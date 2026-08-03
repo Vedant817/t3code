@@ -30,6 +30,7 @@ import { ProjectionCheckpointRepositoryLive } from "../src/persistence/Layers/Pr
 import { ProjectionPendingApprovalRepositoryLive } from "../src/persistence/Layers/ProjectionPendingApprovals.ts";
 import { ProviderSessionRuntimeRepositoryLive } from "../src/persistence/Layers/ProviderSessionRuntime.ts";
 import { makeSqlitePersistenceLive } from "../src/persistence/Layers/Sqlite.ts";
+import { TokenUsageRepositoryLive } from "../src/persistence/Layers/TokenUsage.ts";
 import { ProjectionCheckpointRepository } from "../src/persistence/Services/ProjectionCheckpoints.ts";
 import { ProjectionPendingApprovalRepository } from "../src/persistence/Services/ProjectionPendingApprovals.ts";
 import { makeAdapterRegistryMock } from "../src/provider/testUtils/providerAdapterRegistryMock.ts";
@@ -310,6 +311,7 @@ export const makeOrchestrationIntegrationHarness = (
     const runtimeIngestionLayer = ProviderRuntimeIngestionLive.pipe(
       Layer.provideMerge(runtimeServicesLayer),
       Layer.provideMerge(serverSettingsLayer),
+      Layer.provide(TokenUsageRepositoryLive),
     );
     const gitWorkflowLayer = Layer.mock(GitWorkflowService)({
       renameBranch: (input: {

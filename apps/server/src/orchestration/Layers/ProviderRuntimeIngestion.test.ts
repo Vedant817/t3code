@@ -37,6 +37,10 @@ import { OrchestrationEventStoreLive } from "../../persistence/Layers/Orchestrat
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import {
+  type RecordTokenUsageFactInput,
+  TokenUsageRepository,
+} from "../../persistence/Services/TokenUsage.ts";
+import {
   ProviderService,
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
@@ -222,6 +226,14 @@ describe("ProviderRuntimeIngestion", () => {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
+    const recordedTokenUsageFacts: Array<RecordTokenUsageFactInput> = [];
+    const tokenUsageRepositoryLayer = Layer.succeed(TokenUsageRepository, {
+      record: (input) =>
+        Effect.sync(() => {
+          recordedTokenUsageFacts.push(input);
+        }),
+      query: () => Effect.die("TokenUsageRepository.query is not used in this test harness"),
+    });
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
       Layer.provide(OrchestrationProjectionPipelineLive),
@@ -237,6 +249,7 @@ describe("ProviderRuntimeIngestion", () => {
     const layer = ProviderRuntimeIngestionLive.pipe(
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
+      Layer.provideMerge(tokenUsageRepositoryLayer),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
@@ -315,6 +328,7 @@ describe("ProviderRuntimeIngestion", () => {
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       emit: provider.emit,
       setProviderSession: provider.setSession,
+      recordedTokenUsageFacts,
       drain,
     };
   }
@@ -2942,6 +2956,77 @@ describe("ProviderRuntimeIngestion", () => {
       lastUsedTokens: 1075,
       compactsAutomatically: true,
     });
+  });
+
+  it("persists explicit accounting observations without summing context snapshots", async () => {
+    const harness = await createHarness();
+
+    const accountingObservation = {
+      sourceObservationId: "codex:turn:turn-accounting",
+      sourceKind: "codex.thread-token-usage.last",
+      model: null,
+      reasoningLevel: null,
+      metrics: {
+        inputTokens: 120,
+        cachedInputTokens: 0,
+        outputTokens: 6,
+        reasoningOutputTokens: 0,
+        totalTokens: 126,
+      },
+      metricsProvenance: "exact" as const,
+      modelProvenance: "unknown" as const,
+      reasoningProvenance: "unknown" as const,
+    };
+    harness.emit({
+      type: "thread.token-usage.updated",
+      eventId: asEventId("evt-thread-token-accounting-work"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex_work"),
+      createdAt: "2026-01-01T12:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-accounting"),
+      payload: {
+        usage: { usedTokens: 126 },
+        accounting: [accountingObservation],
+      },
+    });
+    harness.emit({
+      type: "thread.token-usage.updated",
+      eventId: asEventId("evt-thread-token-accounting-personal"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex_personal"),
+      createdAt: "2026-01-01T12:01:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-accounting"),
+      payload: {
+        usage: { usedTokens: 50 },
+        accounting: [
+          {
+            ...accountingObservation,
+            metrics: {
+              ...accountingObservation.metrics,
+              inputTokens: 45,
+              outputTokens: 5,
+              totalTokens: 50,
+            },
+          },
+        ],
+      },
+    });
+    await harness.drain();
+
+    expect(harness.recordedTokenUsageFacts).toHaveLength(2);
+    expect(
+      harness.recordedTokenUsageFacts.map((fact) => fact.providerInstanceId).toSorted(),
+    ).toEqual(["codex_personal", "codex_work"]);
+    expect(
+      harness.recordedTokenUsageFacts.reduce(
+        (total, fact) => total + (fact.observation.metrics.totalTokens ?? 0),
+        0,
+      ),
+    ).toBe(176);
+    expect(harness.recordedTokenUsageFacts[0]?.observation.model).toBe("gpt-5-codex");
+    expect(harness.recordedTokenUsageFacts[0]?.observation.modelProvenance).toBe("inferred");
   });
 
   it("projects Codex camelCase token usage payloads into normalized thread activities", async () => {
