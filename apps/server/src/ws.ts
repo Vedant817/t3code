@@ -1074,6 +1074,12 @@ const makeWsRpcLayer = (
         );
         const environment = yield* serverEnvironment.getDescriptor;
         const auth = yield* serverAuth.getDescriptor();
+        const availableEditorsResult = yield* externalLauncher
+          .resolveAvailableEditors()
+          .pipe(Effect.timeoutOption(Duration.seconds(2)));
+        if (Option.isNone(availableEditorsResult)) {
+          yield* Effect.logWarning("editor discovery timed out while loading server config");
+        }
 
         return {
           environment,
@@ -1083,7 +1089,7 @@ const makeWsRpcLayer = (
           keybindings: keybindingsConfig.keybindings,
           issues: keybindingsConfig.issues,
           providers,
-          availableEditors: yield* externalLauncher.resolveAvailableEditors(),
+          availableEditors: Option.getOrElse(availableEditorsResult, () => []),
           observability: {
             logsDirectoryPath: config.logsDir,
             localTracingEnabled: true,

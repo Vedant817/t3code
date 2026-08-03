@@ -4218,6 +4218,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
   it.effect("routes websocket rpc subscribeServerConfig streams snapshot then update", () =>
     Effect.gen(function* () {
+      const editorDiscoveryStarted = yield* Deferred.make<void>();
       const providers = [
         {
           instanceId: ProviderInstanceId.make("codex"),
@@ -4254,15 +4255,25 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           providerRegistry: {
             getProviders: Effect.succeed(providers),
           },
+          externalLauncher: {
+            resolveAvailableEditors: () =>
+              Deferred.succeed(editorDiscoveryStarted, undefined).pipe(
+                Effect.andThen(Effect.never),
+              ),
+          },
         },
       });
 
       const wsUrl = yield* getWsServerUrl("/ws");
-      const events = yield* Effect.scoped(
+      const eventsFiber = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[WS_METHODS.subscribeServerConfig]({}).pipe(Stream.take(2), Stream.runCollect),
         ),
-      );
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(editorDiscoveryStarted);
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust(Duration.seconds(2));
+      const events = yield* Fiber.join(eventsFiber);
 
       const [first, second] = Array.from(events);
       assert.equal(first?.type, "snapshot");
@@ -4271,7 +4282,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.deepEqual(first.config.keybindings, []);
         assert.deepEqual(first.config.issues, []);
         assert.deepEqual(first.config.providers, providers);
-        assert.equal(first.config.observability.logsDirectoryPath.endsWith("/logs"), true);
+        assert.deepEqual(first.config.availableEditors, []);
+        assert.equal(first.config.observability.logsDirectoryPath.split(/[\\/]/).at(-1), "logs");
         assert.equal(first.config.observability.localTracingEnabled, true);
         assert.equal(first.config.observability.otlpTracesUrl, "http://localhost:4318/v1/traces");
         assert.equal(first.config.observability.otlpTracesEnabled, true);
