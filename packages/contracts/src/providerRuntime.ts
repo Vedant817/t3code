@@ -14,6 +14,7 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
+import { ProviderTokenUsageObservation } from "./tokenUsage.ts";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
@@ -325,6 +326,7 @@ export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
 
 const ThreadTokenUsageUpdatedPayload = Schema.Struct({
   usage: ThreadTokenUsageSnapshot,
+  accounting: Schema.optional(Schema.Array(ProviderTokenUsageObservation)),
 });
 export type ThreadTokenUsageUpdatedPayload = typeof ThreadTokenUsageUpdatedPayload.Type;
 
@@ -364,6 +366,7 @@ const TurnCompletedPayload = Schema.Struct({
   stopReason: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
   usage: Schema.optional(Schema.Unknown),
   modelUsage: Schema.optional(UnknownRecordSchema),
+  accounting: Schema.optional(Schema.Array(ProviderTokenUsageObservation)),
   totalCostUsd: Schema.optional(Schema.Number),
   errorMessage: Schema.optional(TrimmedNonEmptyStringSchema),
 });
