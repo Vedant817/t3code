@@ -53,6 +53,7 @@ import {
   AssetWorkspaceContextResolutionError,
   EnvironmentAuthorizationError,
   ThreadId,
+  TokenUsageQueryError,
   type TerminalAttachStreamEvent,
   type TerminalError,
   type TerminalEvent,
@@ -71,6 +72,7 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
+import { TokenUsageRepository } from "./persistence/Services/TokenUsage.ts";
 import {
   observeRpcEffect as instrumentRpcEffect,
   observeRpcStream as instrumentRpcStream,
@@ -295,6 +297,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [ORCHESTRATION_WS_METHODS.subscribeThread, AuthOrchestrationReadScope],
   [WS_METHODS.serverProbe, AuthOrchestrationReadScope],
   [WS_METHODS.serverGetConfig, AuthOrchestrationReadScope],
+  [WS_METHODS.serverGetTokenUsage, AuthOrchestrationReadScope],
   [WS_METHODS.serverRefreshProviders, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpdateProvider, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpdateServer, AuthOrchestrationOperateScope],
@@ -407,6 +410,7 @@ const makeWsRpcLayer = (
       const currentSessionId = currentSession.sessionId;
       const crypto = yield* Crypto.Crypto;
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+      const tokenUsageRepository = yield* Effect.serviceOption(TokenUsageRepository);
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
@@ -1468,6 +1472,52 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverGetConfig, loadServerConfig, {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.serverGetTokenUsage]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverGetTokenUsage,
+            Effect.gen(function* () {
+              const from = new Date(`${input.fromDate}T00:00:00.000Z`);
+              const to = new Date(`${input.toDate}T00:00:00.000Z`);
+              const validDates =
+                Number.isFinite(from.getTime()) &&
+                Number.isFinite(to.getTime()) &&
+                from.toISOString().slice(0, 10) === input.fromDate &&
+                to.toISOString().slice(0, 10) === input.toDate;
+              const inclusiveDays = validDates
+                ? Math.floor((to.getTime() - from.getTime()) / 86_400_000) + 1
+                : 0;
+              if (!validDates || inclusiveDays < 1 || inclusiveDays > 365) {
+                return yield* new TokenUsageQueryError({
+                  reason: "invalid-range",
+                  message: "Token usage range must contain between 1 and 365 valid calendar days.",
+                });
+              }
+              try {
+                new Intl.DateTimeFormat("en-US", { timeZone: input.timeZone }).format(from);
+              } catch {
+                return yield* new TokenUsageQueryError({
+                  reason: "invalid-time-zone",
+                  message: `Unknown IANA time zone: ${input.timeZone}`,
+                });
+              }
+              if (Option.isNone(tokenUsageRepository)) {
+                return yield* new TokenUsageQueryError({
+                  reason: "persistence",
+                  message: "Token usage storage is unavailable.",
+                });
+              }
+              return yield* tokenUsageRepository.value.query(input).pipe(
+                Effect.mapError(
+                  () =>
+                    new TokenUsageQueryError({
+                      reason: "persistence",
+                      message: "Failed to load token usage.",
+                    }),
+                ),
+              );
+            }),
+            { "rpc.aggregate": "server" },
+          ),
         [WS_METHODS.serverRefreshProviders]: (input) =>
           observeRpcEffect(
             WS_METHODS.serverRefreshProviders,

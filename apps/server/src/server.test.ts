@@ -82,6 +82,7 @@ import { OrchestrationListenerCallbackError } from "./orchestration/Errors.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
+import * as TokenUsageRepository from "./persistence/Services/TokenUsage.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -340,6 +341,7 @@ const buildAppUnderTest = (options?: {
     terminalManager?: Partial<TerminalManager.TerminalManager["Service"]>;
     orchestrationEngine?: Partial<OrchestrationEngine.OrchestrationEngineService["Service"]>;
     projectionSnapshotQuery?: Partial<ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"]>;
+    tokenUsageRepository?: Partial<TokenUsageRepository.TokenUsageRepositoryShape>;
     checkpointDiffQuery?: Partial<CheckpointDiffQuery.CheckpointDiffQuery["Service"]>;
     browserTraceCollector?: Partial<BrowserTraceCollector.BrowserTraceCollector["Service"]>;
     serverLifecycleEvents?: Partial<ServerLifecycleEvents.ServerLifecycleEvents["Service"]>;
@@ -529,7 +531,7 @@ const buildAppUnderTest = (options?: {
         })
       : VcsStatusBroadcaster.layer.pipe(Layer.provide(gitWorkflowLayer));
 
-    const servedRoutesLayer = HttpRouter.serve(makeRoutesLayer, {
+    const servedRoutesLayerBase = HttpRouter.serve(makeRoutesLayer, {
       disableListenLog: true,
       disableLogger: true,
     }).pipe(
@@ -740,6 +742,16 @@ const buildAppUnderTest = (options?: {
         }),
       ),
     );
+
+    const servedRoutesLayer = options?.layers?.tokenUsageRepository
+      ? servedRoutesLayerBase.pipe(
+          Layer.provide(
+            Layer.mock(TokenUsageRepository.TokenUsageRepository)({
+              ...options.layers.tokenUsageRepository,
+            }),
+          ),
+        )
+      : servedRoutesLayerBase;
 
     const appLayer = servedRoutesLayer.pipe(
       Layer.provide(
@@ -3149,6 +3161,42 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("rejects server.getTokenUsage for management-only access tokens", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const { response: exchangeResponse, body: tokenBody } = yield* exchangeAccessToken(
+        defaultDesktopBootstrapToken,
+        { scope: "access:write" },
+      );
+      assert.equal(exchangeResponse.status, 200);
+      const wsTicketResponse = yield* HttpClient.post("/api/auth/websocket-ticket", {
+        headers: {
+          authorization: `Bearer ${tokenBody.access_token ?? ""}`,
+        },
+      });
+      const wsTicketBody = (yield* wsTicketResponse.json) as { readonly ticket: string };
+      assert.equal(wsTicketResponse.status, 200);
+
+      const wsUrl = `${yield* getWsServerUrl("/ws", { authenticated: false })}?wsTicket=${encodeURIComponent(wsTicketBody.ticket)}`;
+      const error = yield* Effect.flip(
+        Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.serverGetTokenUsage]({
+              fromDate: "2026-01-01",
+              toDate: "2026-01-02",
+              timeZone: "UTC",
+            }),
+          ),
+        ),
+      );
+      assert.equal(error._tag, "EnvironmentAuthorizationError");
+      if (error._tag === "EnvironmentAuthorizationError") {
+        assert.equal(error.requiredScope, "orchestration:read");
+      }
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("includes CORS headers on remote auth success responses", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();
@@ -4213,6 +4261,98 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         failureMessage.includes("Unauthorized") ||
           failureMessage.includes("An error occurred during Open"),
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket rpc server.getTokenUsage validates and returns aggregates", () =>
+    Effect.gen(function* () {
+      const query = vi.fn((input) =>
+        Effect.succeed({
+          ...input,
+          trackingStartedAt: null,
+          days: [],
+        }),
+      );
+      yield* buildAppUnderTest({
+        layers: {
+          tokenUsageRepository: { query },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const call = (input: { fromDate: string; toDate: string; timeZone: string }) =>
+        Effect.scoped(
+          withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverGetTokenUsage](input)),
+        );
+      const result = yield* call({
+        fromDate: "2026-01-01",
+        toDate: "2026-01-02",
+        timeZone: "America/New_York",
+      });
+      assert.deepEqual(result, {
+        fromDate: "2026-01-01",
+        toDate: "2026-01-02",
+        timeZone: "America/New_York",
+        trackingStartedAt: null,
+        days: [],
+      });
+
+      for (const input of [
+        { fromDate: "2026-02-30", toDate: "2026-03-01", timeZone: "UTC" },
+        { fromDate: "2026-03-02", toDate: "2026-03-01", timeZone: "UTC" },
+        { fromDate: "2025-01-01", toDate: "2026-01-01", timeZone: "UTC" },
+      ]) {
+        const error = yield* Effect.flip(call(input));
+        assert.equal(error._tag, "TokenUsageQueryError");
+        if (error._tag === "TokenUsageQueryError") {
+          assert.equal(error.reason, "invalid-range");
+        }
+      }
+
+      const timeZoneError = yield* Effect.flip(
+        call({ fromDate: "2026-01-01", toDate: "2026-01-02", timeZone: "Mars/Olympus" }),
+      );
+      assert.equal(timeZoneError._tag, "TokenUsageQueryError");
+      if (timeZoneError._tag === "TokenUsageQueryError") {
+        assert.equal(timeZoneError.reason, "invalid-time-zone");
+      }
+      assert.equal(query.mock.calls.length, 1);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket rpc server.getTokenUsage maps persistence failures", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          tokenUsageRepository: {
+            query: () =>
+              Effect.fail(
+                new PersistenceSqlError({
+                  operation: "TokenUsageRepository.query:test",
+                  detail: "forced token usage query failure",
+                }),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const error = yield* Effect.flip(
+        Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.serverGetTokenUsage]({
+              fromDate: "2026-01-01",
+              toDate: "2026-01-02",
+              timeZone: "UTC",
+            }),
+          ),
+        ),
+      );
+      assert.equal(error._tag, "TokenUsageQueryError");
+      if (error._tag === "TokenUsageQueryError") {
+        assert.equal(error.reason, "persistence");
+        assert.equal(error.message, "Failed to load token usage.");
+      }
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
