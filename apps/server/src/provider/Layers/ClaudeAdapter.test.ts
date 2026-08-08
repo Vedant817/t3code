@@ -2312,22 +2312,6 @@ describe("ClaudeAdapterLive", () => {
         },
         modelUsage: {
           "claude-opus-4-6": {
-            inputTokens: 4,
-            outputTokens: 300,
-            cacheReadInputTokens: 9000,
-            cacheCreationInputTokens: 1000,
-            webSearchRequests: 0,
-            costUSD: 0.1,
-            contextWindow: 200000,
-            maxOutputTokens: 64000,
-          },
-          "claude-haiku-4-5": {
-            inputTokens: 0,
-            outputTokens: 379,
-            cacheReadInputTokens: 12144,
-            cacheCreationInputTokens: 1715,
-            webSearchRequests: 0,
-            costUSD: 0.02,
             contextWindow: 200000,
             maxOutputTokens: 64000,
           },
@@ -2348,44 +2332,6 @@ describe("ClaudeAdapterLive", () => {
             maxTokens: 200000,
           },
         });
-      }
-      const completedEvent = runtimeEvents.find((event) => event.type === "turn.completed");
-      assert.equal(completedEvent?.type, "turn.completed");
-      if (completedEvent?.type === "turn.completed") {
-        assert.deepEqual(completedEvent.payload.accounting, [
-          {
-            sourceObservationId: `claude:turn:${completedEvent.turnId}:model:claude-opus-4-6`,
-            sourceKind: "claude.result.model-usage",
-            model: "claude-opus-4-6",
-            reasoningLevel: null,
-            metrics: {
-              inputTokens: 4,
-              cachedInputTokens: 10000,
-              outputTokens: 300,
-              reasoningOutputTokens: null,
-              totalTokens: 10304,
-            },
-            metricsProvenance: "exact",
-            modelProvenance: "exact",
-            reasoningProvenance: "unknown",
-          },
-          {
-            sourceObservationId: `claude:turn:${completedEvent.turnId}:model:claude-haiku-4-5`,
-            sourceKind: "claude.result.model-usage",
-            model: "claude-haiku-4-5",
-            reasoningLevel: null,
-            metrics: {
-              inputTokens: 0,
-              cachedInputTokens: 13859,
-              outputTokens: 379,
-              reasoningOutputTokens: null,
-              totalTokens: 14238,
-            },
-            metricsProvenance: "exact",
-            modelProvenance: "exact",
-            reasoningProvenance: "unknown",
-          },
-        ]);
       }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -2449,12 +2395,6 @@ describe("ClaudeAdapterLive", () => {
             maxTokens: 200000,
           },
         });
-      }
-      const completedEvent = runtimeEvents.find((event) => event.type === "turn.completed");
-      assert.equal(completedEvent?.type, "turn.completed");
-      if (completedEvent?.type === "turn.completed") {
-        assert.equal(completedEvent.payload.accounting?.[0]?.metrics.totalTokens, 535000);
-        assert.equal(completedEvent.payload.accounting?.[0]?.metricsProvenance, "inferred");
       }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -3630,11 +3570,6 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         runtimeMode: "full-access",
       });
-      const startedEvent = yield* Stream.runHead(adapter.streamEvents);
-      assert.equal(startedEvent._tag, "Some");
-      if (startedEvent._tag === "Some") {
-        assert.equal(startedEvent.value.providerInstanceId, customInstanceId);
-      }
       yield* adapter.sendTurn({
         threadId: session.threadId,
         input: "hello",

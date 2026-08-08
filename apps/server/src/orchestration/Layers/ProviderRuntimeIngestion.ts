@@ -28,12 +28,10 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
-import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
-import { TokenUsageRepository } from "../../persistence/Services/TokenUsage.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
@@ -876,7 +874,6 @@ const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
-  const tokenUsageRepository = yield* TokenUsageRepository;
   const serverSettingsService = yield* ServerSettingsService;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
@@ -1492,55 +1489,6 @@ const make = Effect.gen(function* () {
 
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
-      const accountingObservations =
-        event.type === "thread.token-usage.updated" || event.type === "turn.completed"
-          ? (event.payload.accounting ?? [])
-          : [];
-      if (accountingObservations.length > 0) {
-        const fallbackModel = thread.modelSelection.model;
-        const fallbackReasoningLevel =
-          getModelSelectionStringOptionValue(thread.modelSelection, "reasoningEffort") ??
-          getModelSelectionStringOptionValue(thread.modelSelection, "effort") ??
-          getModelSelectionStringOptionValue(thread.modelSelection, "variant") ??
-          null;
-        for (const observation of accountingObservations) {
-          const model = observation.model ?? fallbackModel;
-          const reasoningLevel = observation.reasoningLevel ?? fallbackReasoningLevel;
-          yield* tokenUsageRepository
-            .record({
-              provider: event.provider,
-              providerInstanceId: event.providerInstanceId ?? null,
-              runtimeEventId: event.eventId,
-              threadId: thread.id,
-              turnId: eventTurnId ?? null,
-              occurredAt: event.createdAt,
-              observation: {
-                ...observation,
-                model,
-                reasoningLevel,
-                modelProvenance:
-                  observation.model === null && model !== null
-                    ? "inferred"
-                    : observation.modelProvenance,
-                reasoningProvenance:
-                  observation.reasoningLevel === null && reasoningLevel !== null
-                    ? "inferred"
-                    : observation.reasoningProvenance,
-              },
-            })
-            .pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("provider token usage accounting failed", {
-                  provider: event.provider,
-                  eventId: event.eventId,
-                  threadId: thread.id,
-                  turnId: eventTurnId ?? null,
-                  cause: Cause.pretty(cause),
-                }),
-              ),
-            );
-        }
-      }
       const activeTurnId = thread.session?.activeTurnId ?? null;
       const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
         threadId: thread.id,

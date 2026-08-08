@@ -521,7 +521,6 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         id: asEventId("evt-msg-complete"),
         kind: "notification",
         provider: ProviderDriverKind.make("codex"),
-        providerInstanceId: ProviderInstanceId.make("codex_work"),
         createdAt: "2026-01-01T00:00:00.000Z",
         method: "item/completed",
         threadId: asThreadId("thread-1"),
@@ -550,7 +549,6 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       if (firstEvent.value.type !== "item.completed") {
         return;
       }
-      NodeAssert.equal(firstEvent.value.providerInstanceId, "codex_work");
       NodeAssert.equal(firstEvent.value.itemId, "msg_1");
       NodeAssert.equal(firstEvent.value.turnId, "turn-1");
       NodeAssert.equal(firstEvent.value.payload.itemType, "assistant_message");
@@ -1150,24 +1148,6 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         lastReasoningOutputTokens: 0,
         compactsAutomatically: true,
       });
-      NodeAssert.deepEqual(firstEvent.value.payload.accounting, [
-        {
-          sourceObservationId: "codex:turn:turn-1",
-          sourceKind: "codex.thread-token-usage.last",
-          model: null,
-          reasoningLevel: null,
-          metrics: {
-            inputTokens: 120,
-            cachedInputTokens: 0,
-            outputTokens: 6,
-            reasoningOutputTokens: 0,
-            totalTokens: 126,
-          },
-          metricsProvenance: "exact",
-          modelProvenance: "unknown",
-          reasoningProvenance: "unknown",
-        },
-      ]);
     }),
   );
 });

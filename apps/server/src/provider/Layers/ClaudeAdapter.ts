@@ -448,100 +448,6 @@ function claudeUsageOutputTokens(usage: Record<string, unknown>): number {
   return finiteNonNegativeInteger(usage.output_tokens) ?? 0;
 }
 
-function claudeAccountingObservations(
-  result: SDKResultMessage | undefined,
-  turnId: TurnId,
-  fallbackModel: string | undefined,
-) {
-  if (!result?.usage || typeof result.usage !== "object" || Array.isArray(result.usage)) {
-    return [];
-  }
-
-  const perModel = Object.entries(result.modelUsage ?? {}).flatMap(([model, modelUsage]) => {
-    const inputTokens = finiteNonNegativeInteger(modelUsage.inputTokens);
-    const outputTokens = finiteNonNegativeInteger(modelUsage.outputTokens);
-    const cacheReadTokens = finiteNonNegativeInteger(modelUsage.cacheReadInputTokens);
-    const cacheCreationTokens = finiteNonNegativeInteger(modelUsage.cacheCreationInputTokens);
-    if (
-      inputTokens === undefined ||
-      outputTokens === undefined ||
-      cacheReadTokens === undefined ||
-      cacheCreationTokens === undefined
-    ) {
-      return [];
-    }
-    const cachedInputTokens = cacheReadTokens + cacheCreationTokens;
-    return [
-      {
-        sourceObservationId: `claude:turn:${turnId}:model:${model}`,
-        sourceKind: "claude.result.model-usage",
-        model,
-        reasoningLevel: null,
-        metrics: {
-          inputTokens,
-          cachedInputTokens,
-          outputTokens,
-          reasoningOutputTokens: null,
-          totalTokens: inputTokens + cachedInputTokens + outputTokens,
-        },
-        metricsProvenance: "exact" as const,
-        modelProvenance: "exact" as const,
-        reasoningProvenance: "unknown" as const,
-      },
-    ];
-  });
-  if (perModel.length > 0) {
-    return perModel;
-  }
-
-  const usage = result.usage as Record<string, unknown>;
-  const inputTokens = finiteNonNegativeInteger(usage.input_tokens);
-  const cacheCreationTokens = finiteNonNegativeInteger(usage.cache_creation_input_tokens);
-  const cacheReadTokens = finiteNonNegativeInteger(usage.cache_read_input_tokens);
-  const outputTokens = finiteNonNegativeInteger(usage.output_tokens);
-  const explicitTotal = finiteNonNegativeInteger(usage.total_tokens);
-  const hasCompleteComponents =
-    inputTokens !== undefined &&
-    cacheCreationTokens !== undefined &&
-    cacheReadTokens !== undefined &&
-    outputTokens !== undefined;
-  const cachedInputTokens = hasCompleteComponents
-    ? cacheCreationTokens + cacheReadTokens
-    : undefined;
-  const totalTokens =
-    explicitTotal ??
-    (hasCompleteComponents ? inputTokens + cachedInputTokens! + outputTokens : undefined);
-  if (totalTokens === undefined) {
-    return [];
-  }
-
-  const reportedModels = Object.keys(result.modelUsage ?? {});
-  const model = reportedModels.length === 1 ? reportedModels[0] : fallbackModel;
-  return [
-    {
-      sourceObservationId: `claude:turn:${turnId}`,
-      sourceKind: "claude.result.usage",
-      model: model ?? null,
-      reasoningLevel: null,
-      metrics: {
-        inputTokens: inputTokens ?? null,
-        cachedInputTokens: cachedInputTokens ?? null,
-        outputTokens: outputTokens ?? null,
-        reasoningOutputTokens: null,
-        totalTokens,
-      },
-      metricsProvenance: hasCompleteComponents ? ("exact" as const) : ("inferred" as const),
-      modelProvenance:
-        reportedModels.length === 1
-          ? ("exact" as const)
-          : model
-            ? ("inferred" as const)
-            : ("unknown" as const),
-      reasoningProvenance: "unknown" as const,
-    },
-  ];
-}
-
 function lastClaudeUsageIteration(
   value: Record<string, unknown>,
 ): Record<string, unknown> | undefined {
@@ -1768,10 +1674,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const makeEventStamp = () => Effect.all({ eventId: nextEventId, createdAt: nowIso });
 
   const offerRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
-    Queue.offer(runtimeEventQueue, {
-      ...event,
-      providerInstanceId: boundInstanceId,
-    }).pipe(Effect.asVoid);
+    Queue.offer(runtimeEventQueue, event).pipe(Effect.asVoid);
 
   const logNativeSdkMessage = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
@@ -2339,13 +2242,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         : undefined);
 
     const turnState = context.turnState;
-    const accountingObservations = turnState
-      ? claudeAccountingObservations(
-          result,
-          turnState.turnId,
-          context.currentApiModelId ?? context.session.model,
-        )
-      : [];
     if (!turnState) {
       yield* emitThreadTokenUsage(context, usageSnapshot, {
         rawMethod: "claude/result",
@@ -2439,7 +2335,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(result?.stop_reason !== undefined ? { stopReason: result.stop_reason } : {}),
         ...(result?.usage ? { usage: result.usage } : {}),
         ...(result?.modelUsage ? { modelUsage: result.modelUsage } : {}),
-        ...(accountingObservations.length > 0 ? { accounting: accountingObservations } : {}),
         ...(typeof result?.total_cost_usd === "number"
           ? { totalCostUsd: result.total_cost_usd }
           : {}),
@@ -4482,14 +4377,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         createdAt: turnStartedStamp.createdAt,
         threadId: context.session.threadId,
         turnId,
-        payload: {
-          ...(modelSelection?.model ? { model: modelSelection.model } : {}),
-          ...(modelSelection
-            ? {
-                effort: getModelSelectionStringOptionValue(modelSelection, "effort") ?? undefined,
-              }
-            : {}),
-        },
+        payload: modelSelection?.model ? { model: modelSelection.model } : {},
         providerRefs: {},
       });
     }

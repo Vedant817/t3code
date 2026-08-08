@@ -161,7 +161,7 @@ function normalizeCodexTokenUsage(
 ): ThreadTokenUsageSnapshot | undefined {
   const totalProcessedTokens = usage.total.totalTokens;
   const usedTokens = usage.last.totalTokens;
-  if (usedTokens === undefined || usedTokens < 0) {
+  if (usedTokens === undefined || usedTokens <= 0) {
     return undefined;
   }
 
@@ -444,7 +444,6 @@ function runtimeEventBase(
   return {
     eventId: event.id,
     provider: event.provider,
-    ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
     threadId: canonicalThreadId,
     createdAt: event.createdAt,
     ...(event.turnId ? { turnId: event.turnId } : {}),
@@ -1016,28 +1015,6 @@ function mapToRuntimeEvents(
         ...runtimeEventBase(event, canonicalThreadId),
         payload: {
           usage: normalizedUsage,
-          ...(event.turnId
-            ? {
-                accounting: [
-                  {
-                    sourceObservationId: `codex:turn:${event.turnId}`,
-                    sourceKind: "codex.thread-token-usage.last",
-                    model: null,
-                    reasoningLevel: null,
-                    metrics: {
-                      inputTokens: normalizedUsage.lastInputTokens ?? null,
-                      cachedInputTokens: normalizedUsage.lastCachedInputTokens ?? null,
-                      outputTokens: normalizedUsage.lastOutputTokens ?? null,
-                      reasoningOutputTokens: normalizedUsage.lastReasoningOutputTokens ?? null,
-                      totalTokens: normalizedUsage.lastUsedTokens ?? normalizedUsage.usedTokens,
-                    },
-                    metricsProvenance: "exact" as const,
-                    modelProvenance: "unknown" as const,
-                    reasoningProvenance: "unknown" as const,
-                  },
-                ],
-              }
-            : {}),
         },
       },
     ];
