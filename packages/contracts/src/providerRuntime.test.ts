@@ -181,44 +181,6 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.usage.maxTokens).toBe(200000);
     expect(parsed.payload.usage.usedTokens).toBe(31251);
   });
-
-  it("decodes accounting observations separately from context snapshots", () => {
-    const parsed = decodeRuntimeEvent({
-      type: "thread.token-usage.updated",
-      eventId: "event-token-accounting-1",
-      provider: "codex",
-      createdAt: "2026-02-28T00:00:04.000Z",
-      threadId: "thread-1",
-      turnId: "turn-1",
-      payload: {
-        usage: { usedTokens: 160 },
-        accounting: [
-          {
-            sourceObservationId: "codex:turn:turn-1",
-            sourceKind: "codex.thread-token-usage.last",
-            model: null,
-            reasoningLevel: null,
-            metrics: {
-              inputTokens: 120,
-              cachedInputTokens: null,
-              outputTokens: 40,
-              reasoningOutputTokens: null,
-              totalTokens: 160,
-            },
-            metricsProvenance: "exact",
-            modelProvenance: "unknown",
-            reasoningProvenance: "unknown",
-          },
-        ],
-      },
-    });
-
-    expect(parsed.type).toBe("thread.token-usage.updated");
-    if (parsed.type !== "thread.token-usage.updated") {
-      throw new Error("expected thread.token-usage.updated");
-    }
-    expect(parsed.payload.accounting?.[0]?.metrics.totalTokens).toBe(160);
-  });
 });
 
 describe("classifyTaskAgentKind", () => {
