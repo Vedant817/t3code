@@ -106,6 +106,8 @@ overrides:
   "expo-sharing>@expo/config-types": 56.0.6
   vite: "catalog:"
   yaml: "catalog:"
+  "@electron/get>undici": ^7.29.0
+  "alchemy>undici": ^7.29.0
 
 packageExtensions:
   "@clerk/expo@*":
