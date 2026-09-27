@@ -165,6 +165,7 @@ import {
   formatWorkingDurationLabel,
   firstValidTimestampMs,
   hasUnseenCompletion,
+  hasParseableCompletion,
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
@@ -3842,7 +3843,7 @@ export default function Sidebar() {
       });
       const unreadThreads = selectedThreads.filter(({ isUnread }) => isUnread);
       const readThreads = selectedThreads.filter(
-        ({ thread, isUnread }) => thread.latestTurn?.completedAt && !isUnread,
+        ({ thread, isUnread }) => hasParseableCompletion(thread) && !isUnread,
       );
       const canSnoozeSelection = selectedThreads.every(
         ({ thread }) =>
@@ -4133,7 +4134,7 @@ export default function Sidebar() {
                 ...thread,
                 lastVisitedAt: useUiStateStore.getState().threadLastVisitedAtById[threadKey],
               }),
-              canMarkUnread: thread.latestTurn?.completedAt != null,
+              canMarkUnread: hasParseableCompletion(thread),
               supports: {
                 settlement: supportsSettlement,
                 autoSettleOptOut: supportsAutoSettleOptOut,

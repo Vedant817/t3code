@@ -18,6 +18,7 @@ import {
   getFallbackThreadIdAfterDelete,
   getProjectSortTimestamp,
   hasUnseenCompletion,
+  hasParseableCompletion,
   isContextMenuPointerDown,
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
@@ -373,6 +374,32 @@ function makeLatestTurn(overrides?: {
       overrides?.completedAt !== undefined ? overrides.completedAt : "2026-03-09T10:05:00.000Z",
   };
 }
+
+describe("hasParseableCompletion", () => {
+  const base = {
+    hasActionableProposedPlan: false,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    interactionMode: "default" as const,
+    session: null,
+  };
+
+  it("accepts a real completion timestamp", () => {
+    expect(hasParseableCompletion({ ...base, latestTurn: makeLatestTurn() })).toBe(true);
+  });
+
+  it("rejects a missing or unparsable completion, which the store would drop", () => {
+    expect(
+      hasParseableCompletion({ ...base, latestTurn: makeLatestTurn({ completedAt: null }) }),
+    ).toBe(false);
+    expect(
+      hasParseableCompletion({
+        ...base,
+        latestTurn: makeLatestTurn({ completedAt: "not-a-date" }),
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("hasUnseenCompletion", () => {
   it("returns true when a thread completed after its last visit", () => {

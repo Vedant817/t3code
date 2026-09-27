@@ -182,6 +182,7 @@ import {
   deleteSelectedThreadEntries,
   getSidebarThreadIdsToPrewarm,
   hasUnseenCompletion,
+  hasParseableCompletion,
   resolveAdjacentThreadId,
   isContextMenuPointerDown,
   isSidebarNestedLinkClick,
@@ -1911,7 +1912,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       );
       const unreadKeys = new Set(unreadEntries.map(({ threadKey }) => threadKey));
       const readEntries = selectedThreadEntries.filter(
-        ({ threadKey, thread }) => thread.latestTurn?.completedAt && !unreadKeys.has(threadKey),
+        ({ threadKey, thread }) => hasParseableCompletion(thread) && !unreadKeys.has(threadKey),
       );
 
       const clicked = await api.contextMenu.show(
@@ -2285,7 +2286,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             : {
                 id: "mark-unread",
                 label: "Mark unread",
-                disabled: thread.latestTurn?.completedAt == null,
+                disabled: !hasParseableCompletion(thread),
               },
           { id: "copy-path", label: "Copy Path" },
           { id: "copy-thread-id", label: "Copy Thread ID" },

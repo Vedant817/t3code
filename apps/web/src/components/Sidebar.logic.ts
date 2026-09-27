@@ -657,6 +657,18 @@ export function useThreadJumpHintVisibility(): {
   };
 }
 
+/**
+ * Read state is stamped from the turn's completion timestamp, and both
+ * `markThreadUnread` and `markThreadVisited` drop a NaN rather than write a
+ * bad one. A non-null but unparsable completion would therefore enable an
+ * action that then changes nothing, so eligibility has to mean the same
+ * thing the store does.
+ */
+export function hasParseableCompletion(thread: ThreadStatusInput): boolean {
+  const completedAt = thread.latestTurn?.completedAt;
+  return completedAt != null && !Number.isNaN(Date.parse(completedAt));
+}
+
 export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
   if (!thread.latestTurn?.completedAt) return false;
   const completedAt = Date.parse(thread.latestTurn.completedAt);

@@ -54,6 +54,9 @@ describe("uiStateStore pure functions", () => {
 
     expect(next.threadLastVisitedAtById[threadId]).toBe("2026-02-25T12:29:59.999Z");
     expect(markThreadUnread(next, threadId, null)).toBe(next);
+    // An unparsable completion is dropped, so callers must gate on it: the
+    // sidebar's hasParseableCompletion is the matching check.
+    expect(markThreadUnread(initialState, threadId, "not-a-date")).toBe(initialState);
   });
 
   it("resolves project expansion from logical, physical, and legacy preference keys", () => {

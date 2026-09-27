@@ -12,7 +12,7 @@ import { useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 
 import { resolveSnoozePresets } from "../components/Sidebar.snooze";
-import { hasUnseenCompletion } from "../components/Sidebar.logic";
+import { hasParseableCompletion, hasUnseenCompletion } from "../components/Sidebar.logic";
 import {
   buildThreadActionMenuItems,
   type ThreadActionMenuId,
@@ -160,7 +160,7 @@ export function useThreadActionMenu(input: {
             lastVisitedAt:
               useUiStateStore.getState().threadLastVisitedAtById[scopedThreadKey(threadRef)],
           }),
-          canMarkUnread: thread.latestTurn?.completedAt != null,
+          canMarkUnread: hasParseableCompletion(thread),
           supports,
           snoozePresets,
         });
