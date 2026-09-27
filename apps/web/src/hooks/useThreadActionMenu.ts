@@ -12,6 +12,7 @@ import { useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 
 import { resolveSnoozePresets } from "../components/Sidebar.snooze";
+import { hasUnseenCompletion } from "../components/Sidebar.logic";
 import {
   buildThreadActionMenuItems,
   type ThreadActionMenuId,
@@ -98,6 +99,7 @@ export function useThreadActionMenu(input: {
   });
   const handleNewThread = useNewThreadHandler();
   const markThreadUnread = useUiStateStore((s) => s.markThreadUnread);
+  const markThreadVisited = useUiStateStore((s) => s.markThreadVisited);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
@@ -153,6 +155,12 @@ export function useThreadActionMenu(input: {
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
           isRunning: thread.session?.status === "running" && thread.session.activeTurnId != null,
+          isUnread: hasUnseenCompletion({
+            ...thread,
+            lastVisitedAt:
+              useUiStateStore.getState().threadLastVisitedAtById[scopedThreadKey(threadRef)],
+          }),
+          canMarkUnread: thread.latestTurn?.completedAt != null,
           supports,
           snoozePresets,
         });
@@ -250,6 +258,11 @@ export function useThreadActionMenu(input: {
           case "mark-unread":
             markThreadUnread(scopedThreadKey(threadRef), thread.latestTurn?.completedAt);
             return;
+          case "mark-read":
+            if (thread.latestTurn?.completedAt) {
+              markThreadVisited(scopedThreadKey(threadRef), thread.latestTurn.completedAt);
+            }
+            return;
           case "copy-path": {
             const workspacePath = thread.worktreePath ?? projectCwd;
             if (!workspacePath) {
@@ -337,6 +350,7 @@ export function useThreadActionMenu(input: {
       handleNewThread,
       logicalProjectKeyByPhysicalKey,
       markThreadUnread,
+      markThreadVisited,
       onStartRename,
       pinThread,
       projectCwd,

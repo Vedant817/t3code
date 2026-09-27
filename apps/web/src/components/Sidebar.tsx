@@ -3824,22 +3824,38 @@ export default function Sidebar() {
       // Snooze (N) is offered when every selected thread can actually take
       // it — a mixed selection with blocked-on-you work would half-apply.
       const selectionNow = new Date();
+      const lastVisitedAtById = useUiStateStore.getState().threadLastVisitedAtById;
       const selectedThreads = threadKeys.flatMap((threadKey) => {
         const thread = threadByKeyRef.current.get(threadKey);
-        return thread ? [thread] : [];
+        return thread
+          ? [
+              {
+                threadKey,
+                thread,
+                isUnread: hasUnseenCompletion({
+                  ...thread,
+                  lastVisitedAt: lastVisitedAtById[threadKey],
+                }),
+              },
+            ]
+          : [];
       });
+      const unreadThreads = selectedThreads.filter(({ isUnread }) => isUnread);
+      const readThreads = selectedThreads.filter(
+        ({ thread, isUnread }) => thread.latestTurn?.completedAt && !isUnread,
+      );
       const canSnoozeSelection = selectedThreads.every(
-        (thread) =>
+        ({ thread }) =>
           serverConfigs.get(thread.environmentId)?.environment.capabilities.threadSnooze === true &&
           canSnooze(thread, { now: selectionNow.toISOString() }),
       );
       const titleRegenerationThreads = selectedThreads.filter(
-        (thread) =>
+        ({ thread }) =>
           serverConfigs.get(thread.environmentId)?.environment.capabilities
             .threadTitleRegeneration === true,
       );
       const regeneratableTitleThreads = titleRegenerationThreads.filter(
-        (thread) => thread.titleRegeneration == null,
+        ({ thread }) => thread.titleRegeneration == null,
       );
       const titleRegenerationMenuItem = buildBulkTitleRegenerationContextMenuItem({
         supportedCount: titleRegenerationThreads.length,
@@ -3849,7 +3865,7 @@ export default function Sidebar() {
       // on a mixed selection the unpinned rows are untouched, and the item
       // is omitted entirely when nothing selected is pinned.
       const pinnedSelectedThreads = selectedThreads.filter(
-        (thread) =>
+        ({ thread }) =>
           serverConfigs.get(thread.environmentId)?.environment.capabilities.threadPinning ===
             true && thread.pinnedAt != null,
       );
@@ -3878,7 +3894,12 @@ export default function Sidebar() {
                 ]
               : []),
             ...(titleRegenerationMenuItem ? [titleRegenerationMenuItem] : []),
-            { id: "mark-unread", label: `Mark unread (${count})` },
+            ...(unreadThreads.length > 0
+              ? [{ id: "mark-read", label: `Mark read (${unreadThreads.length})` }]
+              : []),
+            ...(readThreads.length > 0
+              ? [{ id: "mark-unread", label: `Mark unread (${readThreads.length})` }]
+              : []),
             { id: "delete", label: `Delete (${count})`, destructive: true },
           ],
           position,
@@ -3896,7 +3917,7 @@ export default function Sidebar() {
           const coSnoozingKeys = new Set(threadKeys);
           clearSelection();
           const outcomes = await Promise.all(
-            selectedThreads.map(async (thread) => {
+            selectedThreads.map(async ({ thread }) => {
               const threadRef = scopeThreadRef(thread.environmentId, thread.id);
               const outcome = await performSnooze(threadRef, preset, { coSnoozingKeys });
               return { outcome, threadRef };
@@ -3928,14 +3949,14 @@ export default function Sidebar() {
       }
       if (clicked.value === "unpin") {
         // Each unpin reports its own failure, like the single-row action.
-        for (const thread of pinnedSelectedThreads) {
+        for (const { thread } of pinnedSelectedThreads) {
           attemptUnpin(scopeThreadRef(thread.environmentId, thread.id));
         }
         clearSelection();
         return;
       }
       if (clicked.value === "regenerate-title") {
-        for (const thread of regeneratableTitleThreads) {
+        for (const { thread } of regeneratableTitleThreads) {
           const result = await updateThreadMetadata({
             environmentId: thread.environmentId,
             input: { threadId: thread.id, regenerateTitle: true },
@@ -3972,9 +3993,17 @@ export default function Sidebar() {
         return;
       }
       if (clicked.value === "mark-unread") {
-        for (const threadKey of threadKeys) {
-          const thread = threadByKeyRef.current.get(threadKey);
-          markThreadUnread(threadKey, thread?.latestTurn?.completedAt);
+        for (const { threadKey, thread } of readThreads) {
+          markThreadUnread(threadKey, thread.latestTurn?.completedAt);
+        }
+        clearSelection();
+        return;
+      }
+      if (clicked.value === "mark-read") {
+        for (const { threadKey, thread } of unreadThreads) {
+          if (thread.latestTurn?.completedAt) {
+            markThreadVisited(threadKey, thread.latestTurn.completedAt);
+          }
         }
         clearSelection();
         return;
@@ -4026,6 +4055,7 @@ export default function Sidebar() {
       confirmThreadDelete,
       deleteThread,
       markThreadUnread,
+      markThreadVisited,
       performSnooze,
       removeFromSelection,
       serverConfigs,
@@ -4099,6 +4129,11 @@ export default function Sidebar() {
               isRegeneratingTitle,
               isRunning:
                 thread.session?.status === "running" && thread.session.activeTurnId != null,
+              isUnread: hasUnseenCompletion({
+                ...thread,
+                lastVisitedAt: useUiStateStore.getState().threadLastVisitedAtById[threadKey],
+              }),
+              canMarkUnread: thread.latestTurn?.completedAt != null,
               supports: {
                 settlement: supportsSettlement,
                 autoSettleOptOut: supportsAutoSettleOptOut,
@@ -4215,6 +4250,11 @@ export default function Sidebar() {
           case "mark-unread":
             markThreadUnread(threadKey, thread.latestTurn?.completedAt);
             return;
+          case "mark-read":
+            if (thread.latestTurn?.completedAt) {
+              markThreadVisited(threadKey, thread.latestTurn.completedAt);
+            }
+            return;
           case "copy-path":
             if (!threadWorkspacePath) {
               toastManager.add(
@@ -4312,6 +4352,7 @@ export default function Sidebar() {
       deleteThread,
       handleMultiSelectContextMenu,
       markThreadUnread,
+      markThreadVisited,
       openProjectSettings,
       projectScopeKey,
       projectByKey,

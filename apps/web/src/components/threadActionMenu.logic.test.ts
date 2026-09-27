@@ -12,6 +12,8 @@ const baseState: ThreadActionMenuState = {
   canSnoozeNow: true,
   isRegeneratingTitle: false,
   isRunning: false,
+  isUnread: false,
+  canMarkUnread: true,
   supports: {
     settlement: true,
     autoSettleOptOut: true,
@@ -95,6 +97,20 @@ describe("buildThreadActionMenuItems", () => {
       expect.arrayContaining(["unpin", "unsettle", "unsnooze"]),
     );
     expect(ids(baseState)).toEqual(expect.arrayContaining(["pin", "settle", "snooze"]));
+  });
+
+  it("offers Mark read instead of Mark unread when a completion is unseen", () => {
+    const items = buildThreadActionMenuItems({ ...baseState, isUnread: true });
+    expect(items).toContainEqual({ id: "mark-read", label: "Mark read", icon: "mail-open" });
+    expect(items.some((item) => item.id === "mark-unread")).toBe(false);
+    expect(ids(baseState)).toContain("mark-unread");
+  });
+
+  it("disables Mark unread when the thread has no completed turn", () => {
+    const item = buildThreadActionMenuItems({ ...baseState, canMarkUnread: false }).find(
+      (candidate) => candidate.id === "mark-unread",
+    );
+    expect(item?.disabled).toBe(true);
   });
 
   it("offers auto-settle as a submenu with the current option checked", () => {

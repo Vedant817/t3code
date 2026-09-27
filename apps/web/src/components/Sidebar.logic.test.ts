@@ -326,14 +326,35 @@ describe("buildBulkTitleRegenerationContextMenuItem", () => {
 describe("buildMultiSelectThreadContextMenuItems", () => {
   it("offers bulk archive with the selected count", () => {
     expect(
-      buildMultiSelectThreadContextMenuItems({ count: 3, hasRunningThread: false }),
+      buildMultiSelectThreadContextMenuItems({
+        count: 3,
+        hasRunningThread: false,
+        unreadCount: 0,
+        readCount: 3,
+      }),
     ).toContainEqual({ id: "archive", label: "Archive (3)", disabled: false });
   });
 
   it("disables bulk archive when a selected thread is running", () => {
     expect(
-      buildMultiSelectThreadContextMenuItems({ count: 2, hasRunningThread: true }),
+      buildMultiSelectThreadContextMenuItems({
+        count: 2,
+        hasRunningThread: true,
+        unreadCount: 0,
+        readCount: 2,
+      }),
     ).toContainEqual({ id: "archive", label: "Archive (2)", disabled: true });
+  });
+
+  it("offers the applicable read actions for a mixed selection", () => {
+    const items = buildMultiSelectThreadContextMenuItems({
+      count: 3,
+      hasRunningThread: false,
+      unreadCount: 1,
+      readCount: 2,
+    });
+    expect(items).toContainEqual({ id: "mark-read", label: "Mark read (1)" });
+    expect(items).toContainEqual({ id: "mark-unread", label: "Mark unread (2)" });
   });
 });
 
