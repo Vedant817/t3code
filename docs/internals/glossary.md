@@ -128,6 +128,15 @@ A saved snapshot of a thread workspace at a particular turn. In practice it is a
 
 The durable identifier for a filesystem checkpoint, stored as a Git ref. It is typed in [the contracts][1], constructed in [Utils.ts][22], and used by [CheckpointStore.ts][19].
 
+#### Fork
+
+A new thread derived through a completed checkpoint of another thread. A fork copies only the
+bounded read-model history and checkpoint refs, creates an isolated worktree, and asks the provider
+adapter for an independent continuation. Fork lineage points back to the source thread and boundary;
+the source is never reverted or mutated. Codex, Claude, and OpenCode currently provide exact
+historical provider forks. Cursor and Grok stay capability-gated until their public harness
+contracts can truncate provider history at the same boundary.
+
 #### Checkpoint baseline
 
 The starting checkpoint for diffing a thread timeline. This flow is surfaced through [RuntimeReceiptBus.ts][13], coordinated in [CheckpointReactor.ts][6], and supported by [Utils.ts][22].

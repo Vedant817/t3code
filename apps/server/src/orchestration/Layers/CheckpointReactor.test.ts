@@ -59,6 +59,8 @@ import { checkpointRefForThreadTurn } from "../../checkpointing/Utils.ts";
 import { ServerConfig } from "../../config.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 import * as WorkspacePaths from "../../workspace/WorkspacePaths.ts";
+import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
@@ -81,11 +83,33 @@ function createProviderServiceHarness(
   hasSession = true,
   sessionCwd = cwd,
   providerName: ProviderSession["provider"] = ProviderDriverKind.make("codex"),
+  failFork = false,
 ) {
   const now = "2026-01-01T00:00:00.000Z";
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
   const rollbackConversation = vi.fn(
     (_input: { readonly threadId: ThreadId; readonly numTurns: number }) => Effect.void,
+  );
+  const forkConversation = vi.fn(
+    (input: Parameters<NonNullable<ProviderServiceShape["forkConversation"]>>[0]) =>
+      failFork
+        ? Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: providerName,
+              method: "forkThread",
+              detail: "provider fork failed",
+            }),
+          )
+        : Effect.succeed({
+            provider: providerName,
+            providerInstanceId: input.modelSelection.instanceId,
+            status: "ready" as const,
+            runtimeMode: input.runtimeMode,
+            threadId: input.targetThreadId,
+            cwd: input.cwd,
+            createdAt: now,
+            updatedAt: now,
+          }),
   );
 
   const unsupported = <A>() =>
@@ -126,6 +150,7 @@ function createProviderServiceHarness(
       }),
     rollbackConversation,
     uploadFeedback: () => unsupported(),
+    forkConversation,
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },
@@ -138,6 +163,7 @@ function createProviderServiceHarness(
   return {
     service,
     rollbackConversation,
+    forkConversation,
     emit,
   };
 }
@@ -286,6 +312,8 @@ describe("CheckpointReactor", () => {
     readonly providerSessionCwd?: string;
     readonly providerName?: ProviderDriverKind;
     readonly gitStatusRefreshCalls?: Array<string>;
+    readonly createWorktree?: GitWorkflowService["Service"]["createWorktree"];
+    readonly failFork?: boolean;
   }) {
     const cwd = createGitRepository();
     tempDirs.push(cwd);
@@ -294,6 +322,7 @@ describe("CheckpointReactor", () => {
       options?.hasSession ?? true,
       options?.providerSessionCwd ?? cwd,
       options?.providerName ?? ProviderDriverKind.make("codex"),
+      options?.failFork ?? false,
     );
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
@@ -341,6 +370,12 @@ describe("CheckpointReactor", () => {
       Layer.provideMerge(RuntimeReceiptBusLive),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(vcsStatusBroadcasterLayer),
+      Layer.provideMerge(
+        Layer.succeed(GitWorkflowService, {
+          createWorktree:
+            options?.createWorktree ?? (() => Effect.die("createWorktree should not be called")),
+        } as unknown as GitWorkflowService["Service"]),
+      ),
       Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer))),
       Layer.provideMerge(
         WorkspaceEntries.layer.pipe(
@@ -528,6 +563,136 @@ describe("CheckpointReactor", () => {
         "README.md",
       ),
     ).toBe("v2\n");
+  });
+
+  it("sets up a historical fork with copied refs, isolated worktree metadata, and provider history", async () => {
+    const createWorktree = vi.fn(
+      (input: Parameters<GitWorkflowService["Service"]["createWorktree"]>[0]) => {
+        const worktreePath = NodePath.join(input.cwd, ".fork-worktree");
+        NodeFS.mkdirSync(worktreePath, { recursive: true });
+        return Effect.succeed({
+          worktree: {
+            path: worktreePath,
+            refName: input.newRefName ?? "t3/fork-test",
+          },
+        });
+      },
+    );
+    const harness = await createHarness({ createWorktree });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const sourceThreadId = ThreadId.make("thread-1");
+    const targetThreadId = ThreadId.make("thread-fork-target");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-fork-source-session"),
+        threadId: sourceThreadId,
+        session: {
+          threadId: sourceThreadId,
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-fork-source-checkpoint"),
+        threadId: sourceThreadId,
+        turnId: asTurnId("turn-1"),
+        completedAt: createdAt,
+        checkpointRef: checkpointRefForThreadTurn(sourceThreadId, 1),
+        status: "ready",
+        files: [],
+        checkpointTurnCount: 1,
+        createdAt,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.fork",
+        commandId: CommandId.make("cmd-thread-fork"),
+        threadId: targetThreadId,
+        sourceThreadId,
+        checkpointTurnCount: 1,
+        createdAt,
+      }),
+    );
+    await harness.drain();
+
+    const snapshot = await harness.readModel();
+    const child = snapshot.threads.find((thread) => thread.id === targetThreadId);
+    expect(child?.forkedFrom).toEqual({
+      threadId: sourceThreadId,
+      checkpointTurnCount: 1,
+      turnId: asTurnId("turn-1"),
+    });
+    expect(child?.branch).toBe(`t3/fork-${String(targetThreadId).slice(0, 12)}`);
+    expect(child?.worktreePath).toBe(NodePath.join(harness.cwd, ".fork-worktree"));
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(targetThreadId, 1))).toBe(true);
+    expect(harness.provider.forkConversation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceThreadId,
+        targetThreadId,
+        lastTurnId: asTurnId("turn-1"),
+        checkpointTurnCount: 1,
+        cwd: NodePath.join(harness.cwd, ".fork-worktree"),
+      }),
+    );
+  });
+
+  it("marks the child session failed even when the source has no projected session", async () => {
+    const harness = await createHarness({
+      failFork: true,
+      createWorktree: (input) => {
+        const worktreePath = NodePath.join(input.cwd, ".failed-fork-worktree");
+        NodeFS.mkdirSync(worktreePath, { recursive: true });
+        return Effect.succeed({
+          worktree: { path: worktreePath, refName: input.newRefName ?? "t3/fork-failed" },
+        });
+      },
+    });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const sourceThreadId = ThreadId.make("thread-1");
+    const targetThreadId = ThreadId.make("thread-fork-failed");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-failed-fork-checkpoint"),
+        threadId: sourceThreadId,
+        turnId: asTurnId("turn-1"),
+        completedAt: createdAt,
+        checkpointRef: checkpointRefForThreadTurn(sourceThreadId, 1),
+        status: "ready",
+        files: [],
+        checkpointTurnCount: 1,
+        createdAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.fork",
+        commandId: CommandId.make("cmd-thread-fork-failed"),
+        threadId: targetThreadId,
+        sourceThreadId,
+        checkpointTurnCount: 1,
+        createdAt,
+      }),
+    );
+    await harness.drain();
+
+    const child = (await harness.readModel()).threads.find(
+      (thread) => thread.id === targetThreadId,
+    );
+    expect(child?.session?.status).toBe("error");
+    expect(child?.session?.lastError).toContain("provider fork failed");
+    expect(child?.activities.some((activity) => activity.kind === "thread.fork.failed")).toBe(true);
   });
 
   it("refreshes local git status state on turn completion using the session cwd", async () => {
@@ -1077,7 +1242,9 @@ describe("CheckpointReactor", () => {
       threadId: ThreadId.make("thread-1"),
       numTurns: 1,
     });
-    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toBe("v2\n");
+    expect(
+      NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8").replaceAll("\r\n", "\n"),
+    ).toBe("v2\n");
     expect(
       gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2)),
     ).toBe(false);

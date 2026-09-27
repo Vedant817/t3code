@@ -73,7 +73,7 @@ const runtimeMock = {
     transientErrorSessionIds: new Set<string>(),
     sessionDirectoryById: new Map<string, string>(),
     sessionUpdateCalls: [] as Array<{ sessionID: string; permission: unknown }>,
-    forkCalls: [] as Array<{ sessionID: string; directory?: string }>,
+    forkCalls: [] as Array<{ sessionID: string; directory?: string; messageID?: string }>,
   },
   reset() {
     this.state.startCalls.length = 0;
@@ -165,10 +165,22 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
           runtimeMock.state.sessionUpdateCalls.push({ sessionID, permission });
           return { data: { id: sessionID } };
         },
-        fork: async ({ sessionID, directory }: { sessionID: string; directory?: string }) => {
+        fork: async ({
+          sessionID,
+          directory,
+          messageID,
+        }: {
+          sessionID: string;
+          directory?: string;
+          messageID?: string;
+        }) => {
           // Fork clones history into a new session bound to the directory.
           const forkedId = `${sessionID}_fork`;
-          runtimeMock.state.forkCalls.push({ sessionID, ...(directory ? { directory } : {}) });
+          runtimeMock.state.forkCalls.push({
+            sessionID,
+            ...(directory ? { directory } : {}),
+            ...(messageID ? { messageID } : {}),
+          });
           if (directory) {
             runtimeMock.state.sessionDirectoryById.set(forkedId, directory);
           }
@@ -970,6 +982,46 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         { sessionID: "http://127.0.0.1:9999/session" },
       ]);
       NodeAssert.deepEqual(snapshot.turns, []);
+    }),
+  );
+
+  it.effect("forks OpenCode history at the requested completed turn", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const sourceThreadId = asThreadId("thread-opencode-fork-source");
+      const targetThreadId = asThreadId("thread-opencode-fork-target");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId: sourceThreadId,
+        runtimeMode: "full-access",
+      });
+      runtimeMock.state.messages = [
+        { info: { id: "assistant-1", role: "assistant" }, parts: [] },
+        { info: { id: "assistant-2", role: "assistant" }, parts: [] },
+        { info: { id: "assistant-3", role: "assistant" }, parts: [] },
+      ];
+
+      const result = yield* adapter.forkThread!(
+        sourceThreadId,
+        targetThreadId,
+        null,
+        "/tmp/opencode-fork",
+        2,
+      );
+
+      NodeAssert.equal(adapter.capabilities.threadFork, "native");
+      NodeAssert.deepEqual(runtimeMock.state.forkCalls, [
+        {
+          sessionID: "http://127.0.0.1:9999/session",
+          directory: "/tmp/opencode-fork",
+          messageID: "assistant-2",
+        },
+      ]);
+      NodeAssert.deepEqual(result.resumeCursor, {
+        schemaVersion: 1,
+        threadId: targetThreadId,
+        sessionId: "http://127.0.0.1:9999/session_fork",
+      });
     }),
   );
 

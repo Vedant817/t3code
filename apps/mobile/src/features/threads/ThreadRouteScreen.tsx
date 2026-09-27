@@ -7,7 +7,13 @@ import {
 } from "@react-navigation/native";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as Option from "effect/Option";
-import { EnvironmentId, ThreadId, type ProjectScript } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ThreadId,
+  type MessageId,
+  type ProjectScript,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 import {
   requestOlderThreadTurns,
   threadHasOlderTurns,
@@ -63,6 +69,8 @@ import { useSelectedThreadRequests } from "../../state/use-selected-thread-reque
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { useThreadComposerState } from "../../state/use-thread-composer-state";
 import { threadEnvironment } from "../../state/threads";
+import { useThreadShell } from "../../state/entities";
+import { uuidv4 } from "../../lib/uuid";
 import { projectThreadContentPresentation } from "./threadContentPresentation";
 import {
   useAdaptiveWorkspaceLayout,
@@ -82,6 +90,7 @@ interface ThreadInspectorSelection {
 }
 
 type NativeHeaderItems = ReadonlyArray<Record<string, unknown>>;
+const EXACT_HISTORICAL_FORK_PROVIDERS = new Set(["codex", "claudeAgent", "opencode"]);
 
 function InspectorPaneRoleActivation() {
   useAdaptiveWorkspacePaneRole("inspector");
@@ -214,7 +223,22 @@ function ThreadRouteContent(
   const gitActions = useSelectedThreadGitActions();
   const requests = useSelectedThreadRequests();
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, "thread interrupt");
+  const forkThread = useAtomCommand(threadEnvironment.fork, "thread fork");
+  const [isForkingThread, setIsForkingThread] = useState(false);
+  const [pendingForkThreadRef, setPendingForkThreadRef] = useState<ScopedThreadRef | null>(null);
+  const pendingForkThreadShell = useThreadShell(pendingForkThreadRef);
   const navigation = useNavigation();
+  useEffect(() => {
+    if (!pendingForkThreadRef || !pendingForkThreadShell) return;
+    const forkSessionStatus = pendingForkThreadShell.session?.status;
+    if (forkSessionStatus !== "ready" && forkSessionStatus !== "error") return;
+    setPendingForkThreadRef(null);
+    setIsForkingThread(false);
+    navigation.navigate("Thread", {
+      environmentId: String(pendingForkThreadRef.environmentId),
+      threadId: String(pendingForkThreadRef.threadId),
+    });
+  }, [navigation, pendingForkThreadRef, pendingForkThreadShell]);
   const params = props.route.params;
   const environmentIdRaw = firstRouteParam(params.environmentId);
   const environmentId = environmentIdRaw ? EnvironmentId.make(environmentIdRaw) : null;
@@ -280,6 +304,11 @@ function ThreadRouteContent(
     }, [props.renderInspector]),
   );
   const routeEnvironmentRuntime = useRemoteEnvironmentRuntime(environmentId);
+  const forkProviderName = selectedThread?.session?.providerName;
+  const supportsHistoricalThreadFork =
+    routeEnvironmentRuntime?.serverConfig?.environment.capabilities.threadFork === true &&
+    typeof forkProviderName === "string" &&
+    EXACT_HISTORICAL_FORK_PROVIDERS.has(forkProviderName);
   const routeConnectionState =
     routeEnvironmentRuntime?.connectionState ?? (environmentId ? "available" : connectionState);
   const routeConnectionError = routeEnvironmentRuntime?.connectionError ?? null;
@@ -326,6 +355,58 @@ function ThreadRouteContent(
     [knownTerminalSessions, selectedThreadProject?.workspaceRoot],
   );
   const selectedThreadDetailWorktreePath = selectedThreadDetail?.worktreePath ?? null;
+  const forkTurnCountByMessageId = useMemo(() => {
+    const result = new Map<string, number>();
+    if (!selectedThreadDetail || !supportsHistoricalThreadFork) return result;
+    const checkpointByAssistant = new Map(
+      selectedThreadDetail.checkpoints.flatMap((checkpoint) =>
+        checkpoint.assistantMessageId
+          ? [[checkpoint.assistantMessageId, checkpoint.checkpointTurnCount] as const]
+          : [],
+      ),
+    );
+    for (const [messageId, turnCount] of checkpointByAssistant) result.set(messageId, turnCount);
+    for (let index = 0; index < selectedThreadDetail.messages.length; index += 1) {
+      const message = selectedThreadDetail.messages[index];
+      if (message?.role !== "user") continue;
+      for (let next = index + 1; next < selectedThreadDetail.messages.length; next += 1) {
+        const candidate = selectedThreadDetail.messages[next];
+        if (!candidate || candidate.role === "user") break;
+        const turnCount = checkpointByAssistant.get(candidate.id);
+        if (turnCount !== undefined) {
+          result.set(message.id, Math.max(0, turnCount - 1));
+          break;
+        }
+      }
+    }
+    return result;
+  }, [selectedThreadDetail, supportsHistoricalThreadFork]);
+  const handleForkMessage = useCallback(
+    async (messageId: MessageId) => {
+      if (!selectedThread || isForkingThread) return;
+      const checkpointTurnCount = forkTurnCountByMessageId.get(messageId);
+      if (checkpointTurnCount === undefined) return;
+      const targetThreadId = ThreadId.make(uuidv4());
+      setIsForkingThread(true);
+      const result = await forkThread({
+        environmentId: selectedThread.environmentId,
+        input: {
+          threadId: targetThreadId,
+          sourceThreadId: selectedThread.id,
+          checkpointTurnCount,
+        },
+      });
+      if (result._tag !== "Failure") {
+        setPendingForkThreadRef({
+          environmentId: selectedThread.environmentId,
+          threadId: targetThreadId,
+        });
+      } else {
+        setIsForkingThread(false);
+      }
+    },
+    [forkThread, forkTurnCountByMessageId, isForkingThread, selectedThread],
+  );
   const handleReconnectEnvironment = useCallback(() => {
     if (!environmentId) {
       return;
@@ -785,6 +866,10 @@ function ThreadRouteContent(
           connectionStateLabel={routeConnectionState}
           threadSyncStatus={selectedThreadDetailState.status}
           loadEarlier={loadEarlierTurns}
+          forkTurnCountByMessageId={forkTurnCountByMessageId}
+          onForkMessage={handleForkMessage}
+          isForkingThread={isForkingThread}
+          activeThreadBusy={composer.activeThreadBusy}
           environmentId={selectedThread.environmentId}
           projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
           threadCwd={selectedThreadCwd}

@@ -304,6 +304,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
+          forkedFrom: null,
           latestTurn: {
             turnId: asTurnId("turn-1"),
             state: "completed",
@@ -423,6 +424,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
+          forkedFrom: null,
           latestTurn: {
             turnId: asTurnId("turn-1"),
             state: "completed",
@@ -468,6 +470,19 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       if (threadDetail._tag === "Some") {
         assert.deepEqual(threadDetail.value, snapshot.threads[0]);
       }
+
+      const commandReadModel = yield* snapshotQuery.getCommandReadModel();
+      assert.deepEqual(commandReadModel.threads[0]?.checkpoints, [
+        {
+          turnId: asTurnId("turn-1"),
+          checkpointTurnCount: 1,
+          checkpointRef: asCheckpointRef("checkpoint-1"),
+          status: "ready",
+          files: [{ path: "README.md", kind: "modified", additions: 2, deletions: 1 }],
+          assistantMessageId: asMessageId("message-1"),
+          completedAt: "2026-02-24T00:00:08.000Z",
+        },
+      ]);
     }),
   );
 

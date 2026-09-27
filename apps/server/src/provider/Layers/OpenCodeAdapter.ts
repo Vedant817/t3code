@@ -1700,6 +1700,50 @@ export function makeOpenCodeAdapter(
       },
     );
 
+    const forkThread: OpenCodeAdapterShape["forkThread"] = Effect.fn("forkThread")(
+      function* (sourceThreadId, targetThreadId, _lastTurnId, cwd, checkpointTurnCount) {
+        const context = yield* ensureSessionContext(sessions, sourceThreadId);
+        const messages = yield* runOpenCodeSdk("session.messages", () =>
+          context.client.session.messages({
+            sessionID: context.openCodeSessionId,
+          }),
+        ).pipe(Effect.mapError(toRequestError));
+        const assistantMessages = (messages.data ?? []).filter(
+          (entry) => entry.info.role === "assistant",
+        );
+        const boundary = assistantMessages[checkpointTurnCount - 1];
+        if (!boundary) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "forkThread",
+            issue: `OpenCode history does not contain completed turn ${checkpointTurnCount}.`,
+          });
+        }
+        const forkedResponse = yield* runOpenCodeSdk("session.fork", () =>
+          context.client.session.fork({
+            sessionID: context.openCodeSessionId,
+            directory: cwd,
+            messageID: boundary.info.id,
+          }),
+        ).pipe(Effect.mapError(toRequestError));
+        const forked = forkedResponse.data;
+        if (!forked) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session.fork",
+            detail: "OpenCode session.fork returned no session payload.",
+          });
+        }
+        return {
+          resumeCursor: {
+            schemaVersion: OPENCODE_RESUME_VERSION,
+            threadId: targetThreadId,
+            sessionId: forked.id,
+          },
+        };
+      },
+    );
+
     const stopAll: OpenCodeAdapterShape["stopAll"] = () =>
       Effect.gen(function* () {
         const contexts = [...sessions.values()];
@@ -1719,6 +1763,7 @@ export function makeOpenCodeAdapter(
       provider: PROVIDER,
       capabilities: {
         sessionModelSwitch: "in-session",
+        threadFork: "native",
       },
       startSession,
       sendTurn,
@@ -1730,6 +1775,7 @@ export function makeOpenCodeAdapter(
       hasSession,
       readThread,
       rollbackThread,
+      forkThread,
       stopAll,
       get streamEvents() {
         return Stream.fromQueue(runtimeEvents);

@@ -170,6 +170,9 @@ export interface ThreadFeedProps {
     readonly loading: boolean;
     readonly onLoadEarlier: () => void;
   } | null;
+  readonly forkTurnCountByMessageId?: ReadonlyMap<string, number>;
+  readonly onForkMessage?: (messageId: MessageId) => void;
+  readonly isForkingThread?: boolean;
 }
 
 function MessageAttachmentImage(props: {
@@ -970,7 +973,10 @@ function useMarkdownStyles(
 
 function renderFeedEntry(
   info: { item: ThreadFeedEntry; index: number },
-  props: Pick<ThreadFeedProps, "environmentId" | "skills"> & {
+  props: Pick<
+    ThreadFeedProps,
+    "environmentId" | "skills" | "forkTurnCountByMessageId" | "onForkMessage" | "isForkingThread"
+  > & {
     readonly copiedRowId: string | null;
     readonly expandedWorkRows: Record<string, boolean>;
     readonly terminalAssistantMessageIds: ReadonlySet<string>;
@@ -1099,6 +1105,23 @@ function renderFeedEntry(
             <Text className="font-t3-medium text-xs tabular-nums text-neutral-600 dark:text-neutral-400">
               {timestampLabel}
             </Text>
+            {props.forkTurnCountByMessageId?.has(message.id) && props.onForkMessage ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Fork thread from here"
+                disabled={props.isForkingThread}
+                hitSlop={6}
+                className="h-7 w-7 items-center justify-center"
+                onPress={() => props.onForkMessage?.(message.id)}
+              >
+                <SymbolView
+                  name="arrow.triangle.branch"
+                  size={13}
+                  tintColor={iconSubtleColor}
+                  type="monochrome"
+                />
+              </Pressable>
+            ) : null}
             {message.text.trim().length > 0 ? (
               <CopyTextButton
                 accessibilityLabel="Copy message"
@@ -1158,6 +1181,23 @@ function renderFeedEntry(
         })}
         {showAssistantMeta ? (
           <View className="mt-1 flex-row items-center gap-1">
+            {props.forkTurnCountByMessageId?.has(message.id) && props.onForkMessage ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Fork thread from here"
+                disabled={props.isForkingThread}
+                hitSlop={6}
+                className="h-7 w-7 items-center justify-center"
+                onPress={() => props.onForkMessage?.(message.id)}
+              >
+                <SymbolView
+                  name="arrow.triangle.branch"
+                  size={13}
+                  tintColor={iconSubtleColor}
+                  type="monochrome"
+                />
+              </Pressable>
+            ) : null}
             <CopyTextButton
               accessibilityLabel="Copy message"
               text={message.text}
@@ -2023,6 +2063,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         reviewCommentBubbleWidth,
         userBubbleMaxWidth,
         skills: props.skills,
+        forkTurnCountByMessageId: props.forkTurnCountByMessageId,
+        onForkMessage: props.onForkMessage,
+        isForkingThread: props.isForkingThread,
       }),
     [
       copiedRowId,
@@ -2044,6 +2087,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       props.environmentId,
       props.skills,
       renderMarkdownImage,
+      props.forkTurnCountByMessageId,
+      props.onForkMessage,
+      props.isForkingThread,
     ],
   );
 

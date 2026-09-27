@@ -10,6 +10,7 @@
  *
  * @module usageTranscriptReader
  */
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
@@ -87,6 +88,63 @@ export async function readDirectoryVolumeId(path: string): Promise<string> {
   } catch {
     return "";
   }
+}
+
+/**
+ * How many lexicographically smallest session file names the digest samples.
+ *
+ * Min-K is deliberate: appending a new session only disturbs the sample when
+ * the new name lands among the K smallest, so two scans of the same directory
+ * minutes apart still agree, while a sorted prefix or newest-K would churn on
+ * every insert.
+ */
+const CONTENT_HINT_SAMPLE_SIZE = 16;
+
+/** Below this many distinct names the directory is too sparse to fingerprint. */
+const CONTENT_HINT_MIN_NAMES = CONTENT_HINT_SAMPLE_SIZE;
+
+/** Entry budget for the name-only walk; transcript trees stay far below this. */
+const CONTENT_HINT_WALK_BUDGET = 4000;
+
+/**
+ * Content-derived identity of a transcript directory.
+ *
+ * `volumeId` cannot prove that "the Windows view" and "a WSL view" are the same
+ * physical directory: the boundary changes both the path namespace and the
+ * device/inode space. The session file names inside do not change meaning
+ * across that boundary, so a digest over a stable sample of them does. Returns
+ * `null` when fewer than `CONTENT_HINT_MIN_NAMES` transcripts exist — a sparse
+ * directory must never merge on a weak signal. Name-only readdir, no stat calls,
+ * so this stays cheap next to the scan it accompanies.
+ */
+export async function readDirectoryContentHint(root: string): Promise<string | null> {
+  const names = new Set<string>();
+  let budget = CONTENT_HINT_WALK_BUDGET;
+
+  const walk = async (dir: string): Promise<void> => {
+    if (budget <= 0) return;
+    let entries;
+    try {
+      entries = await NodeFSP.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (budget <= 0) return;
+      budget -= 1;
+      // Mirrors listTranscriptFiles: symlinked subdirectories are not followed.
+      if (entry.isDirectory()) {
+        await walk(NodePath.join(dir, entry.name));
+        continue;
+      }
+      if (entry.name.endsWith(".jsonl")) names.add(entry.name);
+    }
+  };
+
+  await walk(root);
+  if (names.size < CONTENT_HINT_MIN_NAMES) return null;
+  const sample = [...names].sort().slice(0, CONTENT_HINT_SAMPLE_SIZE).join("\n");
+  return NodeCrypto.createHash("sha256").update(sample).digest("hex");
 }
 
 /**

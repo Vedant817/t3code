@@ -291,3 +291,44 @@ export function replaceTextRange(
   const nextText = `${text.slice(0, safeStart)}${replacement}${text.slice(safeEnd)}`;
   return { text: nextText, cursor: safeStart + replacement.length };
 }
+
+export type ComposerEscapeAction = "recall";
+
+/**
+ * Decides what Escape does in the composer.
+ *
+ * Escape only recalls the just-sent message when every overlay that owns it
+ * (menus, palette, approvals, terminal) is out of the way, the composer holds
+ * nothing sendable, and there is a sent prompt to recall. Anything else keeps
+ * Escape inert so it never fights dismissal or IME cancellation.
+ */
+export function composerEscapeAction(input: {
+  key: string;
+  isComposing: boolean;
+  keyCode: number;
+  composerMenuOpen: boolean;
+  stashMenuOpen: boolean;
+  modelPickerOpen: boolean;
+  commandPaletteOpen: boolean;
+  approvalOrProgressActive: boolean;
+  terminalFocused: boolean;
+  hasSendableContent: boolean;
+  lastSentPrompt: string | null;
+}): ComposerEscapeAction | null {
+  if (input.key !== "Escape") return null;
+  // IME composition: Escape cancels candidate windows, never recalls.
+  if (input.isComposing || input.keyCode === 229) return null;
+  if (
+    input.composerMenuOpen ||
+    input.stashMenuOpen ||
+    input.modelPickerOpen ||
+    input.commandPaletteOpen ||
+    input.approvalOrProgressActive ||
+    input.terminalFocused
+  ) {
+    return null;
+  }
+  if (input.hasSendableContent) return null;
+  if (input.lastSentPrompt === null || input.lastSentPrompt.length === 0) return null;
+  return "recall";
+}

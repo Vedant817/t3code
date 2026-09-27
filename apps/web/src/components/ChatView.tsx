@@ -274,6 +274,9 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import { useTurnTokenUsageByTurnId } from "./chat/MessageTokenUsage";
+import { deriveLatestContextWindowSnapshot } from "~/lib/contextWindow";
+import { deriveLatestQuotaSnapshot } from "~/lib/quota";
 import { resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
 import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
@@ -383,6 +386,7 @@ const IMAGE_ONLY_BOOTSTRAP_PROMPT =
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
+const EXACT_HISTORICAL_FORK_PROVIDERS = new Set(["codex", "claudeAgent", "opencode"]);
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
 function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
   const transitionGroupRef = useRef<HTMLDivElement | null>(null);
@@ -1291,6 +1295,7 @@ function ChatViewContent(props: ChatViewProps) {
   const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
     reportFailure: false,
   });
+  const forkThread = useAtomCommand(threadEnvironment.fork, { reportFailure: false });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
   const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
   const { environments } = useEnvironments();
@@ -1302,6 +1307,11 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const composerDraftTarget: ScopedThreadRef | DraftId =
     routeKind === "server" ? routeThreadRef : props.draftId;
+  const composerTargetKey = routeKind === "server" ? routeThreadKey : (props.draftId as string);
+  const getLastSentPrompt = useCallback(
+    () => lastSentPromptsRef.current.get(composerTargetKey) ?? null,
+    [composerTargetKey],
+  );
   const draftThread = useComposerDraftStore((store) =>
     routeKind === "server"
       ? store.getDraftSessionByRef(routeThreadRef)
@@ -1385,6 +1395,8 @@ function ChatViewContent(props: ChatViewProps) {
     (store) => store.setLogicalProjectDraftThreadId,
   );
   const promptRef = useRef("");
+  // Session-scoped per-composer-target memory of the last sent raw draft.
+  const lastSentPromptsRef = useRef(new Map<string, string>());
   const composerImagesRef = useRef<ComposerImageAttachment[]>([]);
   const composerTerminalContextsRef = useRef<TerminalContextDraft[]>([]);
   const composerElementContextsRef = useRef<ElementContextDraft[]>([]);
@@ -1414,6 +1426,23 @@ function ChatViewContent(props: ChatViewProps) {
   >({});
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
+  const [isForkingThread, setIsForkingThread] = useState(false);
+  const [pendingForkThreadRef, setPendingForkThreadRef] = useState<ScopedThreadRef | null>(null);
+  const pendingForkThreadShell = useThreadShell(pendingForkThreadRef);
+  useEffect(() => {
+    if (!pendingForkThreadRef || !pendingForkThreadShell) return;
+    const forkSessionStatus = pendingForkThreadShell.session?.status;
+    if (forkSessionStatus !== "ready" && forkSessionStatus !== "error") return;
+    setPendingForkThreadRef(null);
+    setIsForkingThread(false);
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: {
+        environmentId: pendingForkThreadRef.environmentId,
+        threadId: pendingForkThreadRef.threadId,
+      },
+    });
+  }, [navigate, pendingForkThreadRef, pendingForkThreadShell]);
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
     null,
   );
@@ -2286,6 +2315,16 @@ function ChatViewContent(props: ChatViewProps) {
   const selectedProvider: ProviderDriverKind = lockedProvider ?? unlockedSelectedProvider;
   const phase = derivePhase(activeThread?.session ?? null);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
+  const turnTokenUsageByTurnId = useTurnTokenUsageByTurnId(threadActivities);
+  // Latest provider-reported snapshot feeds the header's thread usage chip.
+  const threadUsageSnapshot = useMemo(
+    () => deriveLatestContextWindowSnapshot(threadActivities),
+    [threadActivities],
+  );
+  const threadQuotaSnapshot = useMemo(
+    () => deriveLatestQuotaSnapshot(threadActivities),
+    [threadActivities],
+  );
   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
   const turnPlans = useMemo(() => deriveTurnPlans(threadActivities), [threadActivities]);
   // Native subagent fold: memoized by activity-list identity, shared by the
@@ -2718,6 +2757,30 @@ function ChatViewContent(props: ChatViewProps) {
 
     return byUserMessageId;
   }, [inferredCheckpointTurnCountByTurnId, timelineEntries, turnDiffSummaryByAssistantMessageId]);
+  const forkTurnCountByMessageId = useMemo(() => {
+    const byMessageId = new Map<MessageId, number>();
+    if (
+      serverConfig?.environment.capabilities.threadFork !== true ||
+      !EXACT_HISTORICAL_FORK_PROVIDERS.has(String(selectedProvider))
+    ) {
+      return byMessageId;
+    }
+    for (const [messageId, turnCount] of revertTurnCountByUserMessageId) {
+      byMessageId.set(messageId, turnCount);
+    }
+    for (const [messageId, summary] of turnDiffSummaryByAssistantMessageId) {
+      const turnCount =
+        summary.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[summary.turnId];
+      if (typeof turnCount === "number") byMessageId.set(messageId, turnCount);
+    }
+    return byMessageId;
+  }, [
+    inferredCheckpointTurnCountByTurnId,
+    revertTurnCountByUserMessageId,
+    selectedProvider,
+    serverConfig?.environment.capabilities.threadFork,
+    turnDiffSummaryByAssistantMessageId,
+  ]);
 
   const gitCwd = activeProject
     ? projectScriptCwd({
@@ -5099,6 +5162,51 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
+  const onForkToTurnCount = useCallback(
+    async (checkpointTurnCount: number) => {
+      if (!activeThread || isForkingThread) return;
+      if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
+        setThreadError(
+          activeThread.id,
+          `Reconnect ${activeEnvironmentUnavailableLabel} before forking this thread.`,
+        );
+        return;
+      }
+      const targetThreadId = newThreadId();
+      setIsForkingThread(true);
+      setThreadError(activeThread.id, null);
+      const result = await forkThread({
+        environmentId,
+        input: {
+          threadId: targetThreadId,
+          sourceThreadId: activeThread.id,
+          checkpointTurnCount,
+        },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThread.id,
+          error instanceof Error ? error.message : "Failed to fork thread.",
+        );
+        setIsForkingThread(false);
+      } else if (result._tag === "Failure") {
+        setIsForkingThread(false);
+      } else {
+        setPendingForkThreadRef(scopeThreadRef(activeThread.environmentId, targetThreadId));
+      }
+    },
+    [
+      activeEnvironmentUnavailable,
+      activeEnvironmentUnavailableLabel,
+      activeThread,
+      environmentId,
+      forkThread,
+      isForkingThread,
+      setThreadError,
+    ],
+  );
+
   const onSend = async (
     e?: { preventDefault: () => void },
     submissionIntent: ComposerSubmissionIntent = "foreground",
@@ -5501,6 +5609,8 @@ function ChatViewContent(props: ChatViewProps) {
         }),
       );
     }
+    // Remember the raw draft so Escape can recall it while the turn runs.
+    lastSentPromptsRef.current.set(composerTargetKey, promptForSend);
     promptRef.current = "";
     clearComposerDraftContent(composerDraftTarget);
     composerRef.current?.resetCursorState();
@@ -6406,6 +6516,14 @@ function ChatViewContent(props: ChatViewProps) {
     }
     void onRevertToTurnCountRef.current(targetTurnCount);
   }, []);
+  const forkTurnCountRef = useRef(forkTurnCountByMessageId);
+  forkTurnCountRef.current = forkTurnCountByMessageId;
+  const onForkToTurnCountRef = useRef(onForkToTurnCount);
+  onForkToTurnCountRef.current = onForkToTurnCount;
+  const onForkMessage = useCallback((messageId: MessageId) => {
+    const targetTurnCount = forkTurnCountRef.current.get(messageId);
+    if (typeof targetTurnCount === "number") void onForkToTurnCountRef.current(targetTurnCount);
+  }, []);
 
   // Empty state: no active thread
   if (!activeThread) {
@@ -6594,6 +6712,8 @@ function ChatViewContent(props: ChatViewProps) {
             {...(routeKind === "draft" && draftId ? { draftId } : {})}
             activeThreadTitle={activeThread.title}
             isServerThread={isServerThread}
+            threadUsageSnapshot={threadUsageSnapshot}
+            threadQuotaSnapshot={threadQuotaSnapshot}
             changeRequest={activeThreadChangeRequest}
             activeProjectName={activeProject?.title}
             activeProjectCwd={activeProject?.workspaceRoot ?? null}
@@ -6675,13 +6795,17 @@ function ChatViewContent(props: ChatViewProps) {
                 onOpenTurnDiff={onOpenTurnDiff}
                 revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
                 onRevertUserMessage={onRevertUserMessage}
+                onForkMessage={onForkMessage}
+                forkTurnCountByMessageId={forkTurnCountByMessageId}
                 isRevertingCheckpoint={isRevertingCheckpoint}
+                isForkingThread={isForkingThread}
                 onImageExpand={onExpandTimelineImage}
                 markdownCwd={gitCwd ?? undefined}
                 resolvedTheme={resolvedTheme}
                 timestampFormat={timestampFormat}
                 workspaceRoot={activeWorkspaceRoot}
                 skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}
+                turnTokenUsageByTurnId={turnTokenUsageByTurnId}
                 anchorMessageId={timelineAnchorMessageId}
                 onAnchorReady={onTimelineAnchorReady}
                 contentInsetEndAdjustment={composerOverlayHeight}
@@ -6851,6 +6975,7 @@ function ChatViewContent(props: ChatViewProps) {
                             scheduleComposerFocus={scheduleComposerFocus}
                             setThreadError={setThreadError}
                             onExpandImage={onExpandTimelineImage}
+                            getLastSentPrompt={getLastSentPrompt}
                           />
                         </div>
                       </div>

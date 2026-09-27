@@ -1429,6 +1429,15 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         }),
       );
 
+    const forkThread: GrokAdapterShape["forkThread"] = (sourceThreadId) =>
+      Effect.fail(
+        new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "forkThread",
+          issue: `Historical thread fork is not supported for Grok sessions yet (${sourceThreadId}).`,
+        }),
+      );
+
     const listSessions: GrokAdapterShape["listSessions"] = () =>
       Effect.sync(() => Array.from(sessions.values(), (c) => ({ ...c.session })));
 
@@ -1452,12 +1461,13 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: { sessionModelSwitch: "in-session", threadFork: "unsupported" },
       startSession,
       sendTurn,
       interruptTurn,
       readThread,
       rollbackThread,
+      forkThread,
       respondToRequest,
       respondToUserInput,
       stopSession,

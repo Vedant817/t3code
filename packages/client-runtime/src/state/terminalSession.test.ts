@@ -123,6 +123,7 @@ describe("terminal session reducers", () => {
         data: " world",
       },
       8,
+      0,
     );
 
     expect(output).toMatchObject({
@@ -170,7 +171,7 @@ describe("terminal session reducers", () => {
     expect(removed).toEqual([]);
   });
 
-  it("caps retained output by UTF-8 byte length", () => {
+  it("caps retained output by UTF-8 byte length when trimming is immediate", () => {
     const state = applyTerminalAttachStreamEvent(
       EMPTY_TERMINAL_BUFFER_STATE,
       {
@@ -180,8 +181,41 @@ describe("terminal session reducers", () => {
         data: "🙂🙂",
       },
       4,
+      0,
     );
 
     expect(state.buffer).toBe("🙂");
+  });
+
+  it("absorbs appends under the ceiling and trims once the slack is spent", () => {
+    // Ceiling 10 bytes, slack 6: the first 16 absorbed bytes stay intact even
+    // though they exceed the ceiling; byte 17 triggers one trim back to 10.
+    let state = applyTerminalAttachStreamEvent(
+      EMPTY_TERMINAL_BUFFER_STATE,
+      {
+        type: "output",
+        threadId: TARGET.threadId,
+        terminalId: TARGET.terminalId,
+        data: "0123456789ABCDEF",
+      },
+      10,
+      6,
+    );
+    expect(state.buffer).toBe("0123456789ABCDEF");
+
+    state = applyTerminalAttachStreamEvent(
+      state,
+      {
+        type: "output",
+        threadId: TARGET.threadId,
+        terminalId: TARGET.terminalId,
+        data: "XYZ",
+      },
+      10,
+      6,
+    );
+
+    expect(state.buffer).toBe("9ABCDEFXYZ");
+    expect(state.bufferBytes).toBe(10);
   });
 });

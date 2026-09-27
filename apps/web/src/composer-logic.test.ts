@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   clampCollapsedComposerCursor,
   collapseExpandedComposerCursor,
+  composerEscapeAction,
   composerSubmissionIntentForEnter,
   detectComposerTrigger,
   expandCollapsedComposerCursor,
@@ -413,5 +414,54 @@ describe("parseStandaloneComposerSlashCommand", () => {
 
   it("ignores slash commands with extra message text", () => {
     expect(parseStandaloneComposerSlashCommand("/plan explain this")).toBeNull();
+  });
+});
+
+describe("composerEscapeAction", () => {
+  const recallable = {
+    key: "Escape",
+    isComposing: false,
+    keyCode: 27,
+    composerMenuOpen: false,
+    stashMenuOpen: false,
+    modelPickerOpen: false,
+    commandPaletteOpen: false,
+    approvalOrProgressActive: false,
+    terminalFocused: false,
+    hasSendableContent: false,
+    lastSentPrompt: "fix the tests",
+  };
+
+  it("recalls the last sent prompt into an empty composer", () => {
+    expect(composerEscapeAction(recallable)).toBe("recall");
+  });
+
+  it("does nothing when the composer still holds sendable content", () => {
+    expect(composerEscapeAction({ ...recallable, hasSendableContent: true })).toBeNull();
+  });
+
+  it("does nothing without a sent prompt to recall", () => {
+    expect(composerEscapeAction({ ...recallable, lastSentPrompt: null })).toBeNull();
+  });
+
+  it("yields to overlays that own Escape", () => {
+    expect(composerEscapeAction({ ...recallable, composerMenuOpen: true })).toBeNull();
+    expect(composerEscapeAction({ ...recallable, stashMenuOpen: true })).toBeNull();
+    expect(composerEscapeAction({ ...recallable, modelPickerOpen: true })).toBeNull();
+    expect(composerEscapeAction({ ...recallable, commandPaletteOpen: true })).toBeNull();
+  });
+
+  it("yields to approvals, progress, and the terminal", () => {
+    expect(composerEscapeAction({ ...recallable, approvalOrProgressActive: true })).toBeNull();
+    expect(composerEscapeAction({ ...recallable, terminalFocused: true })).toBeNull();
+  });
+
+  it("never fires during IME composition", () => {
+    expect(composerEscapeAction({ ...recallable, isComposing: true })).toBeNull();
+    expect(composerEscapeAction({ ...recallable, keyCode: 229 })).toBeNull();
+  });
+
+  it("ignores non-Escape keys", () => {
+    expect(composerEscapeAction({ ...recallable, key: "Enter" })).toBeNull();
   });
 });

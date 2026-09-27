@@ -39,6 +39,7 @@ function summary(
     hostId: string;
     homePath: string;
     volumeId?: string;
+    contentHint?: string;
     distinctSessions?: number;
   }[],
   contractVersion: number = USAGE_CONTRACT_VERSION,
@@ -56,6 +57,7 @@ function summary(
         provider: source.provider,
         resolvedHomePath: source.homePath,
         volumeId: source.volumeId ?? `vol-${source.hostId}`,
+        ...(source.contentHint === undefined ? {} : { contentHint: source.contentHint }),
       },
       status: "ok" as const,
       scannedFiles: 1,
@@ -110,6 +112,116 @@ describe("mergeUsage", () => {
     expect(merged.sessions).toBe(1);
     expect(merged.duplicateSources).toHaveLength(1);
     expect(merged.contributingEnvironments).toEqual(["env-a"]);
+  });
+
+  it("collapses one physical directory seen across an OS boundary", () => {
+    // Windows host plus its WSL distribution reading the same directory:
+    // every metadata field differs, only the content sample agrees.
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-win",
+          summary(
+            [bucket()],
+            [
+              {
+                provider: "claude",
+                hostId: "DESKTOP",
+                homePath: "C:\\Users\\theo\\.claude",
+                volumeId: "0:12345",
+                contentHint: "hint-a",
+              },
+            ],
+          ),
+        ),
+        environment(
+          "env-wsl",
+          summary(
+            [bucket()],
+            [
+              {
+                provider: "claude",
+                hostId: "DESKTOP-Ubuntu",
+                homePath: "/home/theo/.claude",
+                volumeId: "67:98765",
+                contentHint: "hint-a",
+              },
+            ],
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.costUsd).toBe(10);
+    expect(merged.sessions).toBe(1);
+    expect(merged.duplicateSources).toHaveLength(1);
+    expect(merged.contributingEnvironments).toEqual(["env-win"]);
+  });
+
+  it("keeps directories apart when their content samples differ", () => {
+    const windowsSource = {
+      provider: "claude" as const,
+      hostId: "DESKTOP",
+      homePath: "C:\\Users\\theo\\.claude",
+      volumeId: "0:12345",
+    };
+    const merged = mergeUsage(
+      [
+        environment("env-win", summary([bucket()], [windowsSource])),
+        environment(
+          "env-other",
+          summary([bucket()], [{ ...windowsSource, hostId: "OTHER", contentHint: "hint-b" }]),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.costUsd).toBe(20);
+    expect(merged.duplicateSources).toHaveLength(0);
+  });
+
+  it("does not collapse when only one side can sample content", () => {
+    // An old server omits the hint. Metadata differs across the OS boundary,
+    // so without the hint these stay separate; the hinted side must not merge
+    // against a source that cannot prove the same directory.
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-old",
+          summary(
+            [bucket()],
+            [
+              {
+                provider: "claude",
+                hostId: "DESKTOP",
+                homePath: "C:\\Users\\theo\\.claude",
+                volumeId: "0:12345",
+              },
+            ],
+          ),
+        ),
+        environment(
+          "env-new",
+          summary(
+            [bucket()],
+            [
+              {
+                provider: "claude",
+                hostId: "DESKTOP-Ubuntu",
+                homePath: "/home/theo/.claude",
+                volumeId: "67:98765",
+                contentHint: "hint-a",
+              },
+            ],
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.costUsd).toBe(20);
+    expect(merged.duplicateSources).toHaveLength(0);
   });
 
   it("drops only the duplicated provider, keeping the environment's other one", () => {

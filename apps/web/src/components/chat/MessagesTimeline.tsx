@@ -60,6 +60,7 @@ import {
   SquarePenIcon,
   TerminalIcon,
   Undo2Icon,
+  GitForkIcon,
   WrenchIcon,
   XIcon,
   ZapIcon,
@@ -93,6 +94,8 @@ import {
 } from "./MessagesTimeline.logic";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { MessageTokenUsage } from "./MessageTokenUsage";
+import type { TurnTokenUsageSummary } from "~/lib/contextWindow";
 import {
   deriveDisplayedUserMessageState,
   type ParsedTerminalContextEntry,
@@ -141,17 +144,21 @@ interface TimelineRowSharedState {
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertUserMessage: (messageId: MessageId) => void;
+  onForkMessage: (messageId: MessageId) => void;
+  forkTurnCountByMessageId: Map<MessageId, number>;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
   agentPanelModel: AgentPanelModel;
   onOpenAgents: () => void;
+  turnTokenUsageByTurnId: ReadonlyMap<TurnId, TurnTokenUsageSummary>;
 }
 
 interface TimelineRowActivityState {
   isWorking: boolean;
   isRevertingCheckpoint: boolean;
+  isForkingThread: boolean;
   latestTurnId: TurnId | null;
   /** Current plan step label for the working row, when the turn has a plan. */
   workingStepLabel: string | null;
@@ -190,6 +197,9 @@ function TimelineLoadEarlierHeader({
 }
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+const EMPTY_FORK_TURN_COUNTS = new Map<MessageId, number>();
+const EMPTY_TURN_TOKEN_USAGE: ReadonlyMap<TurnId, TurnTokenUsageSummary> = new Map();
+const NOOP_FORK_MESSAGE = (_messageId: MessageId) => {};
 const TIMELINE_MAINTAIN_SCROLL_AT_END = {
   animated: false,
   on: {
@@ -218,7 +228,10 @@ interface MessagesTimelineProps {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
+  onForkMessage?: (messageId: MessageId) => void;
+  forkTurnCountByMessageId?: Map<MessageId, number>;
   isRevertingCheckpoint: boolean;
+  isForkingThread?: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
   markdownCwd: string | undefined;
@@ -226,6 +239,8 @@ interface MessagesTimelineProps {
   timestampFormat: TimestampFormat;
   workspaceRoot: string | undefined;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
+  /** Per-turn token usage derived from thread activities; absent for providers that don't report usage. */
+  turnTokenUsageByTurnId?: ReadonlyMap<TurnId, TurnTokenUsageSummary>;
   anchorMessageId: MessageId | null;
   onAnchorReady: (messageId: MessageId, anchorIndex: number) => void;
   contentInsetEndAdjustment: number;
@@ -263,7 +278,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onOpenTurnDiff,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
+  onForkMessage = NOOP_FORK_MESSAGE,
+  forkTurnCountByMessageId = EMPTY_FORK_TURN_COUNTS,
   isRevertingCheckpoint,
+  isForkingThread = false,
   onImageExpand,
   activeThreadEnvironmentId,
   markdownCwd,
@@ -271,6 +289,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   timestampFormat,
   workspaceRoot,
   skills = EMPTY_TIMELINE_SKILLS,
+  turnTokenUsageByTurnId = EMPTY_TURN_TOKEN_USAGE,
   anchorMessageId,
   onAnchorReady,
   contentInsetEndAdjustment,
@@ -521,7 +540,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
+      turnTokenUsageByTurnId,
       onRevertUserMessage,
+      onForkMessage,
+      forkTurnCountByMessageId,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -537,7 +559,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
+      turnTokenUsageByTurnId,
       onRevertUserMessage,
+      onForkMessage,
+      forkTurnCountByMessageId,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -550,10 +575,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     () => ({
       isWorking,
       isRevertingCheckpoint,
+      isForkingThread,
       latestTurnId: latestTurn?.turnId ?? null,
       workingStepLabel,
     }),
-    [isRevertingCheckpoint, isWorking, latestTurn?.turnId, workingStepLabel],
+    [isWorking, isForkingThread, isRevertingCheckpoint, latestTurn?.turnId, workingStepLabel],
   );
 
   // Stable renderItem — no closure deps. Row components read shared state
@@ -1078,6 +1104,9 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             </TooltipPopup>
           </Tooltip>
           <div className="flex items-center gap-0.5">
+            {ctx.forkTurnCountByMessageId.has(row.message.id) && (
+              <ForkMessageButton messageId={row.message.id} />
+            )}
             {canRevertAgentWork && <RevertUserMessageButton messageId={row.message.id} />}
             {displayedUserMessage.copyText && (
               <MessageCopyButton text={displayedUserMessage.copyText} variant="ghost" />
@@ -1086,6 +1115,30 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
         </div>
       </div>
     </div>
+  );
+}
+
+function ForkMessageButton({ messageId }: { messageId: MessageId }) {
+  const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost"
+            disabled={activity.isForkingThread}
+            onClick={() => ctx.onForkMessage(messageId)}
+            aria-label="Fork thread from here"
+          />
+        }
+      >
+        <GitForkIcon className="size-3" />
+      </TooltipTrigger>
+      <TooltipPopup side="top">Fork thread from here</TooltipPopup>
+    </Tooltip>
   );
 }
 
@@ -1157,7 +1210,11 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         />
         {row.showAssistantMeta ? (
           <div className="mt-1.5 flex items-center gap-2 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
+            {ctx.forkTurnCountByMessageId.has(row.message.id) && (
+              <ForkMessageButton messageId={row.message.id} />
+            )}
             <AssistantCopyButton row={row} />
+            <AssistantTokenUsage turnId={row.message.turnId} />
             {!row.message.streaming && (
               <Tooltip>
                 <TooltipTrigger
@@ -1175,6 +1232,18 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
       </div>
     </>
   );
+}
+
+function AssistantTokenUsage({ turnId }: { turnId: TurnId | null }) {
+  const ctx = use(TimelineRowCtx);
+  if (turnId === null) {
+    return null;
+  }
+  const summary = ctx.turnTokenUsageByTurnId.get(turnId);
+  if (!summary) {
+    return null;
+  }
+  return <MessageTokenUsage summary={summary} />;
 }
 
 function AssistantCopyButton({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {

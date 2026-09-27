@@ -32,6 +32,7 @@ export interface ProviderAdapterCapabilities {
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  readonly threadFork?: "native" | "unsupported";
 }
 
 export interface ProviderThreadTurnSnapshot {
@@ -42,6 +43,10 @@ export interface ProviderThreadTurnSnapshot {
 export interface ProviderThreadSnapshot {
   readonly threadId: ThreadId;
   readonly turns: ReadonlyArray<ProviderThreadTurnSnapshot>;
+}
+
+export interface ProviderThreadForkResult {
+  readonly resumeCursor: unknown;
 }
 
 export interface ProviderAdapterShape<TError> {
@@ -115,6 +120,15 @@ export interface ProviderAdapterShape<TError> {
     threadId: ThreadId,
     numTurns: number,
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
+
+  /** Fork provider history through the inclusive turn boundary. */
+  readonly forkThread?: (
+    sourceThreadId: ThreadId,
+    targetThreadId: ThreadId,
+    lastTurnId: TurnId | null,
+    cwd: string,
+    checkpointTurnCount: number,
+  ) => Effect.Effect<ProviderThreadForkResult, TError>;
 
   /**
    * Upload a thread to the provider when the adapter supports feedback.

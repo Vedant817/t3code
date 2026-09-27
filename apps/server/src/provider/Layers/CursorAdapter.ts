@@ -1144,6 +1144,15 @@ export function makeCursorAdapter(
         }),
       );
 
+    const forkThread: CursorAdapterShape["forkThread"] = (sourceThreadId) =>
+      Effect.fail(
+        new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "forkThread",
+          issue: `Historical thread fork is not supported for Cursor sessions yet (${sourceThreadId}).`,
+        }),
+      );
+
     const listSessions: CursorAdapterShape["listSessions"] = () =>
       Effect.sync(() => Array.from(sessions.values(), (c) => ({ ...c.session })));
 
@@ -1170,12 +1179,13 @@ export function makeCursorAdapter(
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: { sessionModelSwitch: "in-session", threadFork: "unsupported" },
       startSession,
       sendTurn,
       interruptTurn,
       readThread,
       rollbackThread,
+      forkThread,
       respondToRequest,
       respondToUserInput,
       stopSession,

@@ -5,8 +5,8 @@ import type {
 import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
 import { FileTree, useFileTree, useFileTreeSearch } from "@pierre/trees/react";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
-import { RotateCw } from "lucide-react";
-import { useEffect, useMemo, useRef } from "react";
+import { ChevronsDownUpIcon, ChevronsUpDownIcon, RotateCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { InputGroup, InputGroupInput } from "~/components/ui/input-group";
@@ -261,12 +261,61 @@ export default function FileBrowserPanel({
     onRefreshSelectedFile?.();
   };
 
+  // The tree exposes no expansion-change callback, so this aggregate is only
+  // re-synced when we mutate expansion ourselves or rebuild the paths.
+  const [directoriesAllExpanded, setDirectoriesAllExpanded] = useState(false);
+
+  const syncExpansionAggregate = useCallback(() => {
+    const currentModel = treeModelRef.current;
+    if (currentModel === null) return;
+    let sawDirectory = false;
+    let allExpanded = true;
+    for (const [path, kind] of entryKindsRef.current) {
+      if (kind !== "directory") continue;
+      sawDirectory = true;
+      const item = currentModel.getItem(`${path}/`);
+      if (!item || !("isExpanded" in item) || !item.isExpanded()) {
+        allExpanded = false;
+        break;
+      }
+    }
+    setDirectoriesAllExpanded(sawDirectory && allExpanded);
+  }, []);
+
+  const toggleAllDirectories = useCallback(() => {
+    const currentModel = treeModelRef.current;
+    if (currentModel === null) return;
+    const expand = !directoriesAllExpanded;
+    for (const [path, kind] of entryKindsRef.current) {
+      if (kind !== "directory") continue;
+      const item = currentModel.getItem(`${path}/`);
+      if (!item) continue;
+      if (expand && "expand" in item) item.expand();
+      else if ("collapse" in item) item.collapse();
+    }
+    setDirectoriesAllExpanded(expand);
+  }, [directoriesAllExpanded]);
+
   useEffect(() => {
     if (previousTreePathsRef.current === treePaths) return;
     entryKindsRef.current = entryKinds;
     previousTreePathsRef.current = treePaths;
-    model.resetPaths(treePaths);
-  }, [entryKinds, model, treePaths]);
+    // resetPaths rebuilds the store and forgets expansion; snapshot the
+    // user's open folders first so a refresh does not collapse their view.
+    const expandedPaths: string[] = [];
+    for (const [path, kind] of entryKinds) {
+      if (kind !== "directory") continue;
+      const item = model.getItem(`${path}/`);
+      if (item && "isExpanded" in item && item.isExpanded()) {
+        expandedPaths.push(`${path}/`);
+      }
+    }
+    model.resetPaths(
+      treePaths,
+      expandedPaths.length > 0 ? { initialExpandedPaths: expandedPaths } : undefined,
+    );
+    syncExpansionAggregate();
+  }, [entryKinds, model, syncExpansionAggregate, treePaths]);
 
   useEffect(() => {
     if (!selectedPath) {
@@ -361,6 +410,36 @@ export default function FileBrowserPanel({
         data-surface-subheader
       >
         <RefreshFilesButton isPending={entriesQuery.isPending} onRefresh={handleRefresh} />
+        {entries.length > 0 ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  size="icon-xs"
+                  variant="outline"
+                  className="!size-[22px]"
+                  aria-label={
+                    directoriesAllExpanded ? "Collapse all folders" : "Expand all folders"
+                  }
+                  data-scroll-anchor-ignore
+                  onClick={toggleAllDirectories}
+                >
+                  {directoriesAllExpanded ? (
+                    <ChevronsDownUpIcon className="size-3" />
+                  ) : (
+                    <ChevronsUpDownIcon className="size-3" />
+                  )}
+                </Button>
+              }
+            >
+              {directoriesAllExpanded ? "Collapse all folders" : "Expand all folders"}
+            </TooltipTrigger>
+            <TooltipPopup side="top">
+              {directoriesAllExpanded ? "Collapse all folders" : "Expand all folders"}
+            </TooltipPopup>
+          </Tooltip>
+        ) : null}
         <FileSearchField
           name="project-files-search"
           ariaLabel={`Search ${projectName} files`}

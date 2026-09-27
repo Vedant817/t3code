@@ -205,6 +205,8 @@ const multiTerminalHistoryLogPath = (
 interface CreateManagerOptions {
   shellResolver?: () => string;
   env?: NodeJS.ProcessEnv;
+  historyMaxBytes?: number;
+  historyTargetBytes?: number;
   subprocessInspector?: (terminalPid: number) => Effect.Effect<{
     readonly hasRunningSubprocess: boolean;
     readonly childCommand: string | null;
@@ -242,6 +244,12 @@ const createManager = (
       const manager = yield* TerminalManager.makeWithOptions({
         logsDir,
         historyLineLimit,
+        ...(options.historyMaxBytes !== undefined
+          ? { historyMaxBytes: options.historyMaxBytes }
+          : {}),
+        ...(options.historyTargetBytes !== undefined
+          ? { historyTargetBytes: options.historyTargetBytes }
+          : {}),
         ptyAdapter,
         ...(options.shellResolver !== undefined ? { shellResolver: options.shellResolver } : {}),
         ...(options.env !== undefined ? { env: options.env } : {}),
@@ -1087,6 +1095,74 @@ it.layer(
       const reopened = yield* manager.open(openInput());
       const nonEmptyLines = reopened.history.split("\n").filter((line) => line.length > 0);
       expect(nonEmptyLines).toEqual(["line2", "line3", "line4"]);
+    }),
+  );
+
+  it.effect("bounds history bytes even when output never adds lines", () =>
+    Effect.gen(function* () {
+      // CR-redraw progress output overwrites one line forever; only the byte
+      // ceiling stops the persisted file from growing without limit.
+      const { manager, ptyAdapter } = yield* createManager(5_000, {
+        historyMaxBytes: 200,
+        historyTargetBytes: 100,
+      });
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      for (let percent = 0; percent <= 100; percent += 1) {
+        process.emitData(`\rdownloading ${percent}% complete`);
+      }
+      yield* manager.close({ threadId: "thread-1" });
+
+      const reopened = yield* manager.open(openInput());
+      expect(Buffer.byteLength(reopened.history, "utf8")).toBeLessThanOrEqual(200);
+    }),
+  );
+
+  it.effect("keeps the history file current with append-mode flushes", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, logsDir } = yield* createManager(5_000);
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      process.emitData("first ");
+      const historyFile = yield* historyLogPath(logsDir);
+      yield* waitFor(
+        Effect.map(readFileString(historyFile), (content) => content === "first "),
+        "2 seconds",
+      );
+
+      process.emitData("second\n");
+      yield* waitFor(
+        Effect.map(readFileString(historyFile), (content) => content === "first second\n"),
+        "2 seconds",
+      );
+
+      yield* manager.close({ threadId: "thread-1" });
+    }),
+  );
+
+  it.effect("compacts a legacy oversized history file on open", () =>
+    Effect.gen(function* () {
+      const { manager, logsDir } = yield* createManager(5_000, {
+        historyMaxBytes: 300,
+        historyTargetBytes: 150,
+      });
+      // A long single line survives the 5_000-line cap untouched, mimicking
+      // files written before the byte ceiling existed.
+      const historyFile = yield* historyLogPath(logsDir);
+      yield* writeFileString(historyFile, "x".repeat(1_000));
+
+      const reopened = yield* manager.open(openInput());
+      expect(reopened.history.startsWith("x")).toBe(true);
+      expect(Buffer.byteLength(reopened.history, "utf8")).toBeLessThanOrEqual(300);
+
+      const persisted = yield* readFileString(historyFile);
+      expect(persisted).toBe(reopened.history);
     }),
   );
 

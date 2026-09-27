@@ -1,9 +1,13 @@
 import {
+  CheckpointRef,
   CommandId,
   EventId,
+  MessageId,
   ProjectId,
   ProviderDriverKind,
+  ProviderInstanceId,
   ThreadId,
+  TurnId,
   type OrchestrationEvent,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -39,6 +43,127 @@ function makeEvent(input: {
 }
 
 describe("orchestration projector", () => {
+  it("forks only the selected completed history and resets transient state", async () => {
+    const now = "2026-08-09T00:00:00.000Z";
+    const sourceId = ThreadId.make("thread-source");
+    const sourceTurnId = TurnId.make("turn-1");
+    const laterTurnId = TurnId.make("turn-2");
+    const source = {
+      id: sourceId,
+      projectId: ProjectId.make("project-1"),
+      title: "Source",
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      runtimeMode: "full-access" as const,
+      interactionMode: "default" as const,
+      branch: "feature/source",
+      worktreePath: "/repo-source",
+      forkedFrom: null,
+      latestTurn: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      snoozedUntil: null,
+      snoozedAt: null,
+      deletedAt: null,
+      messages: [
+        {
+          id: MessageId.make("user-1"),
+          role: "user" as const,
+          text: "one",
+          turnId: null,
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: MessageId.make("assistant-1"),
+          role: "assistant" as const,
+          text: "done one",
+          turnId: sourceTurnId,
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: MessageId.make("user-2"),
+          role: "user" as const,
+          text: "two",
+          turnId: null,
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: MessageId.make("assistant-2"),
+          role: "assistant" as const,
+          text: "done two",
+          turnId: laterTurnId,
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [
+        {
+          turnId: sourceTurnId,
+          checkpointTurnCount: 1,
+          checkpointRef: CheckpointRef.make("ref-1"),
+          status: "ready" as const,
+          files: [],
+          assistantMessageId: MessageId.make("assistant-1"),
+          completedAt: now,
+        },
+        {
+          turnId: laterTurnId,
+          checkpointTurnCount: 2,
+          checkpointRef: CheckpointRef.make("ref-2"),
+          status: "ready" as const,
+          files: [],
+          assistantMessageId: MessageId.make("assistant-2"),
+          completedAt: now,
+        },
+      ],
+      session: null,
+    };
+    const model = { ...createEmptyReadModel(now), threads: [source] };
+
+    const next = await Effect.runPromise(
+      projectEvent(
+        model,
+        makeEvent({
+          sequence: 5,
+          type: "thread.forked",
+          aggregateKind: "thread",
+          aggregateId: "thread-child",
+          occurredAt: now,
+          commandId: "cmd-fork",
+          payload: {
+            threadId: "thread-child",
+            sourceThreadId: sourceId,
+            checkpointTurnCount: 1,
+            createdAt: now,
+            updatedAt: now,
+          },
+        }),
+      ),
+    );
+
+    const child = next.threads.find((thread) => thread.id === "thread-child");
+    expect(child?.messages.map((message) => message.text)).toEqual(["one", "done one"]);
+    expect(child?.checkpoints).toHaveLength(1);
+    expect(child?.forkedFrom).toEqual({
+      threadId: sourceId,
+      checkpointTurnCount: 1,
+      turnId: sourceTurnId,
+    });
+    expect(child?.session).toBeNull();
+    expect(next.threads.find((thread) => thread.id === sourceId)?.messages).toHaveLength(4);
+  });
+
   it("applies thread.created events", async () => {
     const now = "2026-01-01T00:00:00.000Z";
     const model = createEmptyReadModel(now);

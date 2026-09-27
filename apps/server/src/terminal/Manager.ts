@@ -75,6 +75,17 @@ export {
 };
 
 const DEFAULT_HISTORY_LINE_LIMIT = 5_000;
+/**
+ * Hard ceiling on retained history per terminal, in UTF-8 bytes.
+ *
+ * The line limit alone cannot bound a session whose output is CR-redraws
+ * (progress bars): those overwrite lines instead of adding them, so the file
+ * grew without limit. Clients replay at most 512KB themselves, so a 1MB
+ * ceiling keeps full scrollback fidelity while bounding disk and memory.
+ */
+const DEFAULT_HISTORY_MAX_BYTES = 1024 * 1024;
+/** Size a history is compacted down to when it crosses the ceiling. */
+const DEFAULT_HISTORY_TARGET_BYTES = 512 * 1024;
 const DEFAULT_PERSIST_DEBOUNCE_MS = 40;
 const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
@@ -246,6 +257,11 @@ export interface TerminalSessionState {
   status: TerminalSessionStatus;
   pid: number | null;
   history: string;
+  /**
+   * Disk-write bookkeeping for this session's history file, shared by
+   * reference with the persist queue so coalesced requests stay cumulative.
+   */
+  historyWrite: TerminalHistoryWriteState;
   pendingHistoryControlSequence: string;
   pendingProcessEvents: Array<PendingProcessEvent>;
   pendingProcessEventIndex: number;
@@ -265,8 +281,34 @@ export interface TerminalSessionState {
   runtimeEnv: Record<string, string> | null;
 }
 
-interface PersistHistoryRequest {
+/**
+ * Un-persisted history work for one terminal, mutated in place.
+ *
+ * The persist worker coalesces by keeping only the latest queued request, so
+ * requests carry this shared accumulator rather than a snapshot: chunks pushed
+ * between enqueue and flush are still seen, and `history` always mirrors the
+ * session's current value for rewrite paths.
+ */
+export interface TerminalHistoryWriteState {
+  /** Sanitized output appended to the history but not yet flushed to disk. */
+  chunks: string[];
+  /**
+   * When set, the next flush rewrites the file from `history` instead of
+   * appending — used by resets, cap enforcement, and write-failure recovery.
+   */
+  rewriteNeeded: boolean;
+  /** Mirrors the owning session's capped history for rewrite paths. */
   history: string;
+}
+
+const initialHistoryWriteState = (): TerminalHistoryWriteState => ({
+  chunks: [],
+  rewriteNeeded: false,
+  history: "",
+});
+
+interface PersistHistoryRequest {
+  write: TerminalHistoryWriteState;
   immediate: boolean;
 }
 
@@ -281,7 +323,8 @@ type DrainProcessEventAction =
       threadId: string;
       terminalId: string;
       sequence: number;
-      history: string | null;
+      /** Sanitized chunk appended to history this event; empty when none. */
+      visibleText: string;
       data: string;
     }
   | {
@@ -796,6 +839,51 @@ function capHistory(history: string, maxLines: number): string {
   return hasTrailingNewline ? `${capped}\n` : capped;
 }
 
+/**
+ * Drops whole code points from the head until the history fits `targetBytes`.
+ *
+ * The cut must never split a multi-byte sequence or a surrogate pair, or the
+ * file and every replayed snapshot would carry a corrupt character. Returns
+ * the input unchanged when it is already within `maxBytes`.
+ */
+function capHistoryBytes(history: string, maxBytes: number, targetBytes: number): string {
+  let totalBytes = 0;
+  for (let index = 0; index < history.length; index += 1) {
+    const code = history.charCodeAt(index);
+    totalBytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0xd800 || code > 0xdfff ? 3 : 2;
+    if (code >= 0xd800 && code <= 0xdbff) index += 1;
+  }
+  if (totalBytes <= maxBytes) return history;
+
+  let cutBytes = totalBytes - targetBytes;
+  let index = 0;
+  while (index < history.length && cutBytes > 0) {
+    const code = history.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      // Surrogate pair: drop both halves together.
+      if (cutBytes < 4) break;
+      cutBytes -= 4;
+      index += 2;
+      continue;
+    }
+    const width = code < 0x80 ? 1 : code < 0x800 ? 2 : 3;
+    if (width > cutBytes) break;
+    cutBytes -= width;
+    index += 1;
+  }
+  return history.slice(index);
+}
+
+/** Line and byte retention in one pass; byte compaction follows line capping. */
+function capHistoryForRetention(
+  history: string,
+  maxLines: number,
+  maxBytes: number,
+  targetBytes: number,
+): string {
+  return capHistoryBytes(capHistory(history, maxLines), maxBytes, targetBytes);
+}
+
 function isCsiFinalByte(codePoint: number): boolean {
   return codePoint >= 0x40 && codePoint <= 0x7e;
 }
@@ -1111,6 +1199,10 @@ function normalizedRuntimeEnv(
 interface TerminalManagerOptions {
   logsDir: string;
   historyLineLimit?: number;
+  /** Hard per-terminal history ceiling in bytes. */
+  historyMaxBytes?: number;
+  /** Size a history compacts to when it crosses the ceiling. */
+  historyTargetBytes?: number;
   ptyAdapter: PtyAdapter.PtyAdapter["Service"];
   shellResolver?: () => string;
   env?: NodeJS.ProcessEnv;
@@ -1151,6 +1243,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   const logsDir = options.logsDir;
   const historyLineLimit = options.historyLineLimit ?? DEFAULT_HISTORY_LINE_LIMIT;
+  const historyMaxBytes = options.historyMaxBytes ?? DEFAULT_HISTORY_MAX_BYTES;
+  const historyTargetBytes = options.historyTargetBytes ?? DEFAULT_HISTORY_TARGET_BYTES;
   const platform = yield* HostProcessPlatform;
   // Terminals must inherit the user's full environment (minus the blocklist
   // applied in createTerminalSpawnEnv) — an allowlist here silently strips
@@ -1358,8 +1452,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     never,
     never
   >({
+    // Requests share the session's write accumulator, so "latest wins" still
+    // sees every chunk queued since the last flush.
     merge: (current, next) => ({
-      history: next.history,
+      write: next.write,
       immediate: current.immediate || next.immediate,
     }),
     process: Effect.fn("terminal.persistHistoryWorker")(function* (sessionKey, request) {
@@ -1372,12 +1468,34 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         return;
       }
 
-      yield* fileSystem.writeFileString(historyPath(threadId, terminalId), request.history).pipe(
+      // Capture the batch synchronously before yielding, so chunks appended
+      // during a slow write land in the next flush instead of this one.
+      const batch = request.write.chunks.join("");
+      request.write.chunks = [];
+      const rewrite = request.write.rewriteNeeded;
+      request.write.rewriteNeeded = false;
+
+      if (!rewrite && batch.length === 0) {
+        return;
+      }
+
+      const targetPath = historyPath(threadId, terminalId);
+      yield* (
+        rewrite
+          ? fileSystem.writeFileString(targetPath, request.write.history)
+          : fileSystem.writeFileString(targetPath, batch, { flag: "a" })
+      ).pipe(
         Effect.catch((error) =>
-          Effect.logWarning("failed to persist terminal history", {
-            threadId,
-            terminalId,
-            error,
+          Effect.gen(function* () {
+            // Restore the un-persisted work and force a full rewrite so a
+            // half-applied append cannot silently diverge from memory.
+            request.write.chunks.unshift(batch);
+            request.write.rewriteNeeded = true;
+            yield* Effect.logWarning("failed to persist terminal history", {
+              threadId,
+              terminalId,
+              error,
+            });
           }),
         ),
       );
@@ -1385,14 +1503,33 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   });
 
   const queuePersist = Effect.fn("terminal.queuePersist")(function* (
-    threadId: string,
-    terminalId: string,
-    history: string,
+    session: TerminalSessionState,
+    chunk: string,
   ) {
-    yield* persistWorker.enqueue(toSessionKey(threadId, terminalId), {
-      history,
+    session.historyWrite.chunks.push(chunk);
+    session.historyWrite.history = session.history;
+    yield* persistWorker.enqueue(toSessionKey(session.threadId, session.terminalId), {
+      write: session.historyWrite,
       immediate: false,
     });
+  });
+
+  /**
+   * Rewrites the file from the session's current history and waits for it to
+   * land. Used by resets (clear/restart/context change), which start a new
+   * stream that must not be appended onto the previous one.
+   */
+  const persistHistoryReset = Effect.fn("terminal.persistHistoryReset")(function* (
+    session: TerminalSessionState,
+  ) {
+    session.historyWrite.chunks = [];
+    session.historyWrite.rewriteNeeded = true;
+    session.historyWrite.history = session.history;
+    yield* persistWorker.enqueue(toSessionKey(session.threadId, session.terminalId), {
+      write: session.historyWrite,
+      immediate: true,
+    });
+    yield* flushPersist(session.threadId, session.terminalId);
   });
 
   const flushPersist = Effect.fn("terminal.flushPersist")(function* (
@@ -1402,16 +1539,16 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     yield* persistWorker.drainKey(toSessionKey(threadId, terminalId));
   });
 
-  const persistHistory = Effect.fn("terminal.persistHistory")(function* (
-    threadId: string,
-    terminalId: string,
-    history: string,
+  /** Flushes whatever this session still has queued, waiting for the write. */
+  const persistHistoryFlush = Effect.fn("terminal.persistHistoryFlush")(function* (
+    session: TerminalSessionState,
   ) {
-    yield* persistWorker.enqueue(toSessionKey(threadId, terminalId), {
-      history,
+    session.historyWrite.history = session.history;
+    yield* persistWorker.enqueue(toSessionKey(session.threadId, session.terminalId), {
+      write: session.historyWrite,
       immediate: true,
     });
-    yield* flushPersist(threadId, terminalId);
+    yield* flushPersist(session.threadId, session.terminalId);
   });
 
   const readHistory = Effect.fn("terminal.readHistory")(function* (
@@ -1435,7 +1572,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             (cause) => new TerminalHistoryError({ operation: "read", threadId, terminalId, cause }),
           ),
         );
-      const capped = capHistory(raw, historyLineLimit);
+      // Compact files written before the byte ceiling existed (or by an
+      // older build): one rewrite on open, then append-mode keeps it small.
+      const capped = capHistoryForRetention(
+        raw,
+        historyLineLimit,
+        historyMaxBytes,
+        historyTargetBytes,
+      );
       if (capped !== raw) {
         yield* fileSystem
           .writeFileString(nextPath, capped)
@@ -1475,7 +1619,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             new TerminalHistoryError({ operation: "migrate", threadId, terminalId, cause }),
         ),
       );
-    const capped = capHistory(raw, historyLineLimit);
+    const capped = capHistoryForRetention(
+      raw,
+      historyLineLimit,
+      historyMaxBytes,
+      historyTargetBytes,
+    );
     yield* fileSystem
       .writeFileString(nextPath, capped)
       .pipe(
@@ -1661,9 +1810,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           );
           session.pendingHistoryControlSequence = sanitized.pendingControlSequence;
           if (sanitized.visibleText.length > 0) {
-            session.history = capHistory(
+            session.history = capHistoryForRetention(
               `${session.history}${sanitized.visibleText}`,
               historyLineLimit,
+              historyMaxBytes,
+              historyTargetBytes,
             );
           }
           const eventStamp = advanceEventSequence(session);
@@ -1673,7 +1824,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             threadId: session.threadId,
             terminalId: session.terminalId,
             sequence: eventStamp.sequence,
-            history: sanitized.visibleText.length > 0 ? session.history : null,
+            visibleText: sanitized.visibleText,
             data: nextEvent.data,
           } as const;
         }
@@ -1713,8 +1864,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }
 
       if (action.type === "output") {
-        if (action.history !== null) {
-          yield* queuePersist(action.threadId, action.terminalId, action.history);
+        if (action.visibleText.length > 0) {
+          yield* queuePersist(session, action.visibleText);
         }
 
         yield* publishEvent({
@@ -1972,7 +2123,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     if (Option.isSome(session)) {
       yield* stopProcess(session.value);
       yield* unregisterTerminal({ threadId, terminalId });
-      yield* persistHistory(threadId, terminalId, session.value.history);
+      yield* persistHistoryFlush(session.value);
     }
 
     yield* flushPersist(threadId, terminalId);
@@ -2161,6 +2312,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         status: "starting",
         pid: null,
         history,
+        historyWrite: initialHistoryWriteState(),
         pendingHistoryControlSequence: "",
         pendingProcessEvents: [],
         pendingProcessEventIndex: 0,
@@ -2226,7 +2378,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       liveSession.pendingProcessEvents = [];
       liveSession.pendingProcessEventIndex = 0;
       liveSession.processEventDrainRunning = false;
-      yield* persistHistory(liveSession.threadId, liveSession.terminalId, liveSession.history);
+      yield* persistHistoryReset(liveSession);
     } else if (liveSession.status === "exited" || liveSession.status === "error") {
       liveSession.runtimeEnv = nextRuntimeEnv;
       liveSession.worktreePath = nextWorktreePath;
@@ -2235,7 +2387,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       liveSession.pendingProcessEvents = [];
       liveSession.pendingProcessEventIndex = 0;
       liveSession.processEventDrainRunning = false;
-      yield* persistHistory(liveSession.threadId, liveSession.terminalId, liveSession.history);
+      yield* persistHistoryReset(liveSession);
     }
 
     if (!liveSession.process) {
@@ -2536,12 +2688,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         const terminalId = input.terminalId;
         const session = yield* requireSession(input.threadId, terminalId);
         session.history = "";
+        session.historyWrite = initialHistoryWriteState();
         session.pendingHistoryControlSequence = "";
         session.pendingProcessEvents = [];
         session.pendingProcessEventIndex = 0;
         session.processEventDrainRunning = false;
         const eventStamp = advanceEventSequence(session);
-        yield* persistHistory(input.threadId, terminalId, session.history);
+        yield* persistHistoryReset(session);
         yield* publishEvent({
           type: "cleared",
           threadId: input.threadId,
@@ -2573,6 +2726,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             status: "starting",
             pid: null,
             history: "",
+            historyWrite: initialHistoryWriteState(),
             pendingHistoryControlSequence: "",
             pendingProcessEvents: [],
             pendingProcessEventIndex: 0,
@@ -2609,11 +2763,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         const rows = input.rows ?? session.rows;
 
         session.history = "";
+        session.historyWrite = initialHistoryWriteState();
         session.pendingHistoryControlSequence = "";
         session.pendingProcessEvents = [];
         session.pendingProcessEventIndex = 0;
         session.processEventDrainRunning = false;
-        yield* persistHistory(input.threadId, terminalId, session.history);
+        yield* persistHistoryReset(session);
         yield* startSession(
           session,
           {

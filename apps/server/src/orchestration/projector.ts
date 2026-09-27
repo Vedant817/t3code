@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
+import { checkpointRefForThreadTurn } from "../checkpointing/Utils.ts";
 import {
   MessageSentPayloadSchema,
   ProjectCreatedPayload,
@@ -17,6 +18,7 @@ import {
   ThreadActivityAppendedPayload,
   ThreadArchivedPayload,
   ThreadCreatedPayload,
+  ThreadForkedPayload,
   ThreadDeletedPayload,
   ThreadInteractionModeSetPayload,
   ThreadMetaUpdatedPayload,
@@ -321,6 +323,108 @@ export function projectEvent(
             ? nextBase.threads.map((entry) => (entry.id === thread.id ? thread : entry))
             : [...nextBase.threads, thread],
         };
+      });
+
+    case "thread.forked":
+      return Effect.gen(function* () {
+        const payload = yield* decodeForEvent(
+          ThreadForkedPayload,
+          event.payload,
+          event.type,
+          "payload",
+        );
+        const source = nextBase.threads.find((thread) => thread.id === payload.sourceThreadId);
+        if (!source) return nextBase;
+
+        const checkpoints = source.checkpoints
+          .filter((checkpoint) => checkpoint.checkpointTurnCount <= payload.checkpointTurnCount)
+          .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount);
+        const retainedTurnIds = new Set(checkpoints.map((checkpoint) => checkpoint.turnId));
+        const sourceMessages = retainThreadMessagesAfterRevert(
+          source.messages,
+          retainedTurnIds,
+          payload.checkpointTurnCount,
+        );
+        const remap = (kind: string, id: string) => `fork:${payload.threadId}:${kind}:${id}`;
+        const turnIdBySource = new Map(
+          checkpoints.map((checkpoint) => [
+            checkpoint.turnId,
+            remap("turn", checkpoint.turnId) as typeof checkpoint.turnId,
+          ]),
+        );
+        const messageIdBySource = new Map(
+          sourceMessages.map((message) => [
+            message.id,
+            remap("message", message.id) as typeof message.id,
+          ]),
+        );
+        const messages = sourceMessages.map((message) => ({
+          ...message,
+          id: messageIdBySource.get(message.id)!,
+          turnId: message.turnId === null ? null : (turnIdBySource.get(message.turnId) ?? null),
+          streaming: false,
+        }));
+        const forkedCheckpoints = checkpoints.map((checkpoint) => ({
+          ...checkpoint,
+          checkpointRef: checkpointRefForThreadTurn(
+            payload.threadId,
+            checkpoint.checkpointTurnCount,
+          ),
+          turnId: turnIdBySource.get(checkpoint.turnId)!,
+          assistantMessageId:
+            checkpoint.assistantMessageId === null
+              ? null
+              : (messageIdBySource.get(checkpoint.assistantMessageId) ?? null),
+        }));
+        const latestCheckpoint = forkedCheckpoints.at(-1) ?? null;
+        const sourceBoundary = checkpoints.at(-1) ?? null;
+        const thread = yield* decodeForEvent(
+          OrchestrationThread,
+          {
+            id: payload.threadId,
+            projectId: source.projectId,
+            title: `${source.title} (fork)`,
+            modelSelection: source.modelSelection,
+            runtimeMode: source.runtimeMode,
+            interactionMode: source.interactionMode,
+            branch: null,
+            worktreePath: null,
+            forkedFrom: {
+              threadId: source.id,
+              checkpointTurnCount: payload.checkpointTurnCount,
+              turnId: sourceBoundary?.turnId ?? null,
+            },
+            latestTurn:
+              latestCheckpoint === null
+                ? null
+                : {
+                    turnId: latestCheckpoint.turnId,
+                    state: checkpointStatusToLatestTurnState(latestCheckpoint.status),
+                    requestedAt: latestCheckpoint.completedAt,
+                    startedAt: latestCheckpoint.completedAt,
+                    completedAt: latestCheckpoint.completedAt,
+                    assistantMessageId: latestCheckpoint.assistantMessageId,
+                  },
+            createdAt: payload.createdAt,
+            updatedAt: payload.updatedAt,
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            snoozedUntil: null,
+            snoozedAt: null,
+            pinnedAt: null,
+            pinOrderKey: null,
+            deletedAt: null,
+            messages,
+            proposedPlans: [],
+            activities: [],
+            checkpoints: forkedCheckpoints,
+            session: null,
+          },
+          event.type,
+          "thread",
+        );
+        return { ...nextBase, threads: [...nextBase.threads, thread] };
       });
 
     case "thread.deleted":

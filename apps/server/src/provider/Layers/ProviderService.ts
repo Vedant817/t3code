@@ -1219,6 +1219,51 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ),
   );
 
+  const forkConversation: ProviderServiceMethod<"forkConversation"> = Effect.fn("forkConversation")(
+    function* (input) {
+      const routed = yield* resolveRoutableSession({
+        threadId: input.sourceThreadId,
+        operation: "ProviderService.forkConversation",
+        allowRecovery: true,
+      });
+      if (
+        input.checkpointTurnCount > 0 &&
+        (routed.adapter.capabilities.threadFork !== "native" || !routed.adapter.forkThread)
+      ) {
+        return yield* toValidationError(
+          "ProviderService.forkConversation",
+          `Provider '${routed.adapter.provider}' does not support historical thread forks.`,
+        );
+      }
+      const forked =
+        input.checkpointTurnCount === 0
+          ? undefined
+          : yield* routed.adapter.forkThread!(
+              input.sourceThreadId,
+              input.targetThreadId,
+              input.lastTurnId,
+              input.cwd,
+              input.checkpointTurnCount,
+            );
+      // Codex app-server keeps the newly forked provider thread attached to the
+      // source session's process. Release that writer before the child session
+      // resumes the forked cursor; the source remains durable and is recovered
+      // normally on its next turn.
+      if (forked !== undefined) {
+        yield* routed.adapter.stopSession(input.sourceThreadId);
+      }
+      return yield* startSession(input.targetThreadId, {
+        threadId: input.targetThreadId,
+        providerInstanceId: routed.instanceId,
+        provider: routed.adapter.provider,
+        cwd: input.cwd,
+        runtimeMode: input.runtimeMode,
+        modelSelection: input.modelSelection,
+        ...(forked === undefined ? {} : { resumeCursor: forked.resumeCursor }),
+      });
+    },
+  );
+
   return {
     startSession,
     sendTurn,
@@ -1231,6 +1276,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     getInstanceInfo,
     rollbackConversation,
     uploadFeedback,
+    forkConversation,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

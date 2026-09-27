@@ -19,6 +19,9 @@ import {
   type SettingSource,
   type SDKUserMessage,
   type ModelUsage,
+  forkSession,
+  getSessionMessages,
+  type SessionMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import {
@@ -175,9 +178,10 @@ function toSessionPermissionUpdates(
   toolName: string,
   suggestions: ReadonlyArray<PermissionUpdate> | undefined,
 ): Array<PermissionUpdate> {
-  const sessionScoped = (suggestions ?? []).map(
-    (suggestion): PermissionUpdate => ({ ...suggestion, destination: "session" }),
-  );
+  const sessionScoped = (suggestions ?? []).map((suggestion): PermissionUpdate => ({
+    ...suggestion,
+    destination: "session",
+  }));
   if (sessionScoped.length > 0) {
     return sessionScoped;
   }
@@ -258,6 +262,7 @@ interface ClaudeSessionContext {
   readonly turns: Array<{
     id: TurnId;
     items: Array<unknown>;
+    boundaryMessageId: string | undefined;
   }>;
   readonly inFlightTools: Map<number, ToolInFlight>;
   readonly claudeTasks: Map<string, ClaudeTaskState>;
@@ -296,8 +301,45 @@ export interface ClaudeAdapterLiveOptions {
     readonly prompt: AsyncIterable<SDKUserMessage>;
     readonly options: ClaudeQueryOptions;
   }) => ClaudeQueryRuntime;
+  readonly forkSession?: typeof forkSession;
+  readonly getSessionMessages?: typeof getSessionMessages;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+}
+
+function isClaudeTranscriptUserPrompt(entry: SessionMessage): boolean {
+  if (entry.type !== "user" || entry.parent_tool_use_id !== null) return false;
+  const message = entry.message as { readonly content?: unknown } | undefined;
+  const content = message?.content;
+  if (typeof content === "string") return content.trim().length > 0;
+  if (!Array.isArray(content)) return false;
+  return content.some((block) => {
+    if (!block || typeof block !== "object") return false;
+    const type = (block as { readonly type?: unknown }).type;
+    return type !== "tool_result" && type !== "tool_use_result";
+  });
+}
+
+export function claudeForkBoundaryMessageId(
+  messages: ReadonlyArray<SessionMessage>,
+  checkpointTurnCount: number,
+): string | undefined {
+  const boundaries: string[] = [];
+  let activeBoundary: string | undefined;
+  let hasActivePrompt = false;
+  for (const entry of messages) {
+    if (isClaudeTranscriptUserPrompt(entry)) {
+      if (hasActivePrompt && activeBoundary) boundaries.push(activeBoundary);
+      hasActivePrompt = true;
+      activeBoundary = undefined;
+      continue;
+    }
+    if (hasActivePrompt && entry.type === "assistant" && entry.parent_tool_use_id === null) {
+      activeBoundary = entry.uuid;
+    }
+  }
+  if (hasActivePrompt && activeBoundary) boundaries.push(activeBoundary);
+  return boundaries[checkpointTurnCount - 1];
 }
 
 function isUuid(value: string): boolean {
@@ -1684,6 +1726,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         prompt: input.prompt,
         options: input.options,
       }) as ClaudeQueryRuntime);
+  const forkClaudeSession = options?.forkSession ?? forkSession;
+  const readClaudeSessionMessages = options?.getSessionMessages ?? getSessionMessages;
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
@@ -2345,6 +2389,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context.turns.push({
       id: turnState.turnId,
       items: [...turnState.items],
+      boundaryMessageId: context.lastAssistantUuid,
     });
 
     yield* emitThreadTokenUsage(context, usageSnapshot, {
@@ -4494,6 +4539,68 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
+  const forkThread: ClaudeAdapterShape["forkThread"] = Effect.fn("forkThread")(
+    function* (sourceThreadId, targetThreadId, lastTurnId, _cwd, checkpointTurnCount) {
+      const context = yield* requireSession(sourceThreadId);
+      const sourceSessionId = context.resumeSessionId;
+      if (!sourceSessionId) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "forkThread",
+          issue: "Claude session does not have a durable resume id.",
+        });
+      }
+      let boundaryMessageId =
+        lastTurnId === null
+          ? undefined
+          : context.turns.find((turn) => turn.id === lastTurnId)?.boundaryMessageId;
+      if (!boundaryMessageId) {
+        const messages = yield* Effect.tryPromise({
+          try: () =>
+            readClaudeSessionMessages(sourceSessionId, {
+              ...(context.session.cwd ? { dir: context.session.cwd } : {}),
+            }),
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "getSessionMessages",
+              detail: toMessage(cause, "Failed to read Claude session history."),
+              cause,
+            }),
+        });
+        boundaryMessageId = claudeForkBoundaryMessageId(messages, checkpointTurnCount);
+      }
+      if (!boundaryMessageId) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "forkThread",
+          issue: `Claude history does not contain completed turn ${checkpointTurnCount}.`,
+        });
+      }
+      const forked = yield* Effect.tryPromise({
+        try: () =>
+          forkClaudeSession(sourceSessionId, {
+            ...(context.session.cwd ? { dir: context.session.cwd } : {}),
+            upToMessageId: boundaryMessageId,
+          }),
+        catch: (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "forkSession",
+            detail: toMessage(cause, "Failed to fork Claude session."),
+            cause,
+          }),
+      });
+      return {
+        resumeCursor: {
+          threadId: targetThreadId,
+          resume: forked.sessionId,
+          turnCount: checkpointTurnCount,
+        },
+      };
+    },
+  );
+
   const respondToRequest: ClaudeAdapterShape["respondToRequest"] = Effect.fn("respondToRequest")(
     function* (threadId, requestId, decision) {
       const context = yield* requireSession(threadId);
@@ -4578,12 +4685,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
+      threadFork: "native",
     },
     startSession,
     sendTurn,
     interruptTurn,
     readThread,
     rollbackThread,
+    forkThread,
     respondToRequest,
     respondToUserInput,
     stopSession,

@@ -79,6 +79,7 @@ import {
 } from "../../providerInstances";
 import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { isMacPlatform } from "../../lib/utils";
+import { requestAgentNotificationPermission } from "../../lib/agentNotifications";
 import { primaryServerObservabilityAtom, primaryServerProvidersAtom } from "../../state/server";
 import { useProjects } from "../../state/entities";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
@@ -1968,6 +1969,37 @@ export function GeneralSettingsPanel() {
                 updateSettings({ sidebarAutoSettleOnMerge: Boolean(checked) })
               }
               aria-label="Auto-settle merged threads"
+            />
+          }
+        />
+
+        <SettingsRow
+          {...searchableSetting("agent-notifications")}
+          description="Get notified when a background thread finishes, fails, or needs your approval."
+          resetAction={
+            settings.agentNotificationsEnabled !==
+            DEFAULT_UNIFIED_SETTINGS.agentNotificationsEnabled ? (
+              <SettingResetButton
+                label="agent notifications"
+                onClick={() =>
+                  updateSettings({
+                    agentNotificationsEnabled: DEFAULT_UNIFIED_SETTINGS.agentNotificationsEnabled,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.agentNotificationsEnabled}
+              onCheckedChange={(checked) => {
+                updateSettings({ agentNotificationsEnabled: Boolean(checked) });
+                if (checked) {
+                  // The toggle click is the user gesture browsers require.
+                  void requestAgentNotificationPermission();
+                }
+              }}
+              aria-label="Agent notifications"
             />
           }
         />

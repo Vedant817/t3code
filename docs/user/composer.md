@@ -19,3 +19,14 @@ On desktop, press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows and Linux from
 start it in the background. T3 Code opens another new thread and shows an **Open** action for the
 thread that started. The new thread keeps the selected workspace mode and base branch. If **New
 worktree** is selected, each background thread creates its own worktree.
+
+## Recall the last sent message
+
+On web and desktop, press `Escape` while the composer is empty to bring back the raw text of the
+most recent message you sent in that thread. The recalled text lands in the composer with the
+cursor at the end, ready to edit and send again; the sent message itself is unchanged. Pressing
+`Escape` again does nothing until you send a new message. Images stay attached to the original
+message, so only text comes back.
+
+`Escape` still closes whatever has focus first: open menus, the command palette, approval panels,
+and the terminal all keep their usual behavior.

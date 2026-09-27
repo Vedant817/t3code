@@ -16,6 +16,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import type * as PlatformError from "effect/PlatformError";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
@@ -38,6 +39,7 @@ import type { OrchestrationDispatchError } from "../Errors.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
+import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -50,6 +52,15 @@ type ReactorInput =
       readonly source: "domain";
       readonly event: OrchestrationEvent;
     };
+
+class ThreadForkSetupError extends Schema.TaggedErrorClass<ThreadForkSetupError>()(
+  "ThreadForkSetupError",
+  { detail: Schema.String },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
 
 function toTurnId(value: string | undefined): TurnId | null {
   return value === undefined ? null : TurnId.make(String(value));
@@ -88,6 +99,35 @@ const make = Effect.gen(function* () {
   const receiptBus = yield* RuntimeReceiptBus;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
+  const gitWorkflow = yield* GitWorkflowService;
+
+  const appendForkFailureActivity = (input: {
+    readonly threadId: ThreadId;
+    readonly detail: string;
+    readonly createdAt: string;
+  }) =>
+    Effect.all({
+      commandId: serverCommandId("thread-fork-failure"),
+      activityId: serverEventId,
+    }).pipe(
+      Effect.flatMap(({ commandId, activityId }) =>
+        orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId,
+          threadId: input.threadId,
+          activity: {
+            id: activityId,
+            tone: "error",
+            kind: "thread.fork.failed",
+            summary: "Thread fork setup failed",
+            payload: { detail: input.detail },
+            turnId: null,
+            createdAt: input.createdAt,
+          },
+          createdAt: input.createdAt,
+        }),
+      ),
+    );
 
   const appendRevertFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -817,6 +857,88 @@ const make = Effect.gen(function* () {
       );
   });
 
+  const handleThreadForked = Effect.fn("handleThreadForked")(function* (
+    event: Extract<OrchestrationEvent, { type: "thread.forked" }>,
+  ) {
+    const source = yield* resolveThreadDetail(event.payload.sourceThreadId);
+    if (!source)
+      return yield* new ThreadForkSetupError({
+        detail: "Source thread detail is unavailable after fork.",
+      });
+    const projects = yield* resolveThreadProjects(source.projectId);
+    const project = projects[0];
+    if (!project)
+      return yield* new ThreadForkSetupError({
+        detail: "Source project is unavailable after fork.",
+      });
+    const checkpoint =
+      event.payload.checkpointTurnCount === 0
+        ? null
+        : source.checkpoints.find(
+            (entry) => entry.checkpointTurnCount === event.payload.checkpointTurnCount,
+          );
+    const checkpointRef =
+      checkpoint?.checkpointRef ??
+      checkpointRefForThreadTurn(event.payload.sourceThreadId, event.payload.checkpointTurnCount);
+    const exists = yield* checkpointStore.hasCheckpointRef({
+      cwd: source.worktreePath ?? project.workspaceRoot,
+      checkpointRef,
+    });
+    if (!exists)
+      return yield* new ThreadForkSetupError({
+        detail: `Filesystem checkpoint ${checkpointRef} is unavailable.`,
+      });
+
+    const branch = `t3/fork-${String(event.payload.threadId).slice(0, 12)}`;
+    const sourceCwd = source.worktreePath ?? project.workspaceRoot;
+    const retainedTurnCounts = new Set([
+      0,
+      ...source.checkpoints
+        .filter((entry) => entry.checkpointTurnCount <= event.payload.checkpointTurnCount)
+        .map((entry) => entry.checkpointTurnCount),
+    ]);
+    if (!checkpointStore.copyCheckpointRef) {
+      return yield* new ThreadForkSetupError({ detail: "Checkpoint ref copying is unavailable." });
+    }
+    yield* Effect.forEach(
+      retainedTurnCounts,
+      (turnCount) =>
+        checkpointStore.copyCheckpointRef!({
+          cwd: sourceCwd,
+          sourceCheckpointRef: checkpointRefForThreadTurn(event.payload.sourceThreadId, turnCount),
+          targetCheckpointRef: checkpointRefForThreadTurn(event.payload.threadId, turnCount),
+        }),
+      { concurrency: 1, discard: true },
+    );
+    const created = yield* gitWorkflow.createWorktree({
+      cwd: project.workspaceRoot,
+      refName: checkpointRef,
+      newRefName: branch,
+      path: null,
+    });
+    yield* orchestrationEngine.dispatch({
+      type: "thread.meta.update",
+      commandId: yield* serverCommandId("thread-fork-worktree"),
+      threadId: event.payload.threadId,
+      branch: created.worktree.refName,
+      worktreePath: created.worktree.path,
+    });
+    if (!providerService.forkConversation) {
+      return yield* new ThreadForkSetupError({
+        detail: "Provider service does not support historical thread forks.",
+      });
+    }
+    yield* providerService.forkConversation({
+      sourceThreadId: event.payload.sourceThreadId,
+      targetThreadId: event.payload.threadId,
+      lastTurnId: checkpoint?.turnId ?? null,
+      checkpointTurnCount: event.payload.checkpointTurnCount,
+      cwd: created.worktree.path,
+      modelSelection: source.modelSelection,
+      runtimeMode: source.runtimeMode,
+    });
+  });
+
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (event: OrchestrationEvent) {
     if (event.type === "thread.turn-start-requested" || event.type === "thread.message-sent") {
       yield* ensurePreTurnBaselineFromDomainTurnStart(event);
@@ -834,6 +956,43 @@ const make = Effect.gen(function* () {
               createdAt,
             }),
           ),
+        ),
+      );
+      return;
+    }
+
+    if (event.type === "thread.forked") {
+      yield* handleThreadForked(event).pipe(
+        Effect.catch((error) =>
+          Effect.gen(function* () {
+            const createdAt = yield* nowIso;
+            const source = yield* resolveThreadDetail(event.payload.sourceThreadId);
+            yield* orchestrationEngine
+              .dispatch({
+                type: "thread.session.set",
+                commandId: yield* serverCommandId("thread-fork-failure-session"),
+                threadId: event.payload.threadId,
+                session: {
+                  threadId: event.payload.threadId,
+                  status: "error",
+                  providerName: source?.session?.providerName ?? null,
+                  ...(source?.session?.providerInstanceId
+                    ? { providerInstanceId: source.session.providerInstanceId }
+                    : {}),
+                  runtimeMode: source?.runtimeMode ?? "full-access",
+                  activeTurnId: null,
+                  lastError: error.message,
+                  updatedAt: createdAt,
+                },
+                createdAt,
+              })
+              .pipe(Effect.catch(() => Effect.void));
+            yield* appendForkFailureActivity({
+              threadId: event.payload.threadId,
+              detail: error.message,
+              createdAt,
+            }).pipe(Effect.catch(() => Effect.void));
+          }),
         ),
       );
       return;
@@ -919,6 +1078,7 @@ const make = Effect.gen(function* () {
           event.type !== "thread.turn-start-requested" &&
           event.type !== "thread.message-sent" &&
           event.type !== "thread.checkpoint-revert-requested" &&
+          event.type !== "thread.forked" &&
           event.type !== "thread.turn-diff-completed"
         ) {
           return Effect.void;

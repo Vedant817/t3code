@@ -761,10 +761,17 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         }
 
         const message = `t3 checkpoint ref=${input.checkpointRef}`;
+        const headCommit = headExists ? yield* resolveHeadCommit(input.cwd) : null;
         const commitTreeResult = yield* execute({
           operation,
           cwd: input.cwd,
-          args: ["commit-tree", treeOid, "-m", message],
+          args: [
+            "commit-tree",
+            treeOid,
+            ...(headCommit === null ? [] : ["-p", headCommit]),
+            "-m",
+            message,
+          ],
           env: commitEnv,
         });
         const commitOid = commitTreeResult.stdout.trim();
@@ -905,6 +912,23 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         );
       },
     ),
+    copyCheckpointRef: Effect.fn("GitVcsDriver.checkpoints.copyCheckpointRef")(function* (input) {
+      const commitOid = yield* resolveCheckpointCommit(input.cwd, input.sourceCheckpointRef);
+      if (commitOid === null) {
+        return yield* new VcsProcessExitError({
+          operation: "GitVcsDriver.checkpoints.copyCheckpointRef",
+          command: "git rev-parse",
+          cwd: input.cwd,
+          exitCode: 1,
+          detail: `Source checkpoint ref '${input.sourceCheckpointRef}' does not exist.`,
+        });
+      }
+      yield* execute({
+        operation: "GitVcsDriver.checkpoints.copyCheckpointRef",
+        cwd: input.cwd,
+        args: ["update-ref", input.targetCheckpointRef, commitOid],
+      });
+    }),
   };
 
   return {

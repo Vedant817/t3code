@@ -256,6 +256,89 @@ function buildContextWindowActivityPayload(
   return event.payload.usage;
 }
 
+/** One normalized rate-limit window in the quota activity payload. */
+interface QuotaWindowPayload {
+  readonly kind: string;
+  /** 0-100. Absent when the provider reported no utilization figure. */
+  readonly usedPercent?: number;
+  /** Epoch milliseconds. Providers report epoch seconds; normalized here. */
+  readonly resetsAtMs?: number;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+/**
+ * Providers report reset instants inconsistently (epoch seconds today, with
+ * historical variance); magnitude decides rather than trusting either unit.
+ */
+function normalizeEpochToMs(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+  const ms = value >= 1e12 ? value : value * 1000;
+  return Number.isFinite(ms) && ms > 0 ? ms : undefined;
+}
+
+function normalizeUsedPercent(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  // Claude reports a 0-1 fraction; Codex reports percent already.
+  const percent = value > 0 && value <= 1 ? value * 100 : value;
+  if (!Number.isFinite(percent) || percent < 0 || percent > 100) return undefined;
+  return Math.round(percent);
+}
+
+function quotaWindow(
+  kind: string,
+  source: Record<string, unknown> | null,
+): QuotaWindowPayload | null {
+  if (!source) return null;
+  const usedPercent = normalizeUsedPercent(source.usedPercent ?? source.utilization);
+  const resetsAtMs = normalizeEpochToMs(source.resetsAt);
+  if (usedPercent === undefined && resetsAtMs === undefined) return null;
+  return {
+    kind,
+    ...(usedPercent !== undefined ? { usedPercent } : {}),
+    ...(resetsAtMs !== undefined ? { resetsAtMs } : {}),
+  };
+}
+
+/**
+ * Normalizes provider rate-limit pushes into one payload shape.
+ *
+ * Claude sends a single window keyed by limit type (`five_hour`, `seven_day`,
+ * ...) where `utilization` is a fraction and often absent while usage is
+ * allowed. Codex sends primary/secondary windows with integer
+ * `usedPercent`. Windows without either figure are dropped; an event that
+ * yields no windows produces no activity.
+ */
+function buildQuotaActivityPayload(
+  event: ProviderRuntimeEvent,
+): { readonly windows: readonly QuotaWindowPayload[] } | undefined {
+  if (event.type !== "account.rate-limits.updated") return undefined;
+  const outer = asRecord(event.payload.rateLimits);
+
+  // Codex: { rateLimits: { primary, secondary, ... } }
+  const codexSnapshot = asRecord(outer?.rateLimits);
+  const codexWindows = [
+    quotaWindow("primary", asRecord(codexSnapshot?.primary)),
+    quotaWindow("secondary", asRecord(codexSnapshot?.secondary)),
+  ].filter((window): window is QuotaWindowPayload => window !== null);
+  if (codexWindows.length > 0) return { windows: codexWindows };
+
+  // Claude: { rate_limit_info: { status, rateLimitType?, utilization?, resetsAt? } }
+  const claudeInfo = asRecord(outer?.rate_limit_info);
+  if (claudeInfo) {
+    const kind =
+      typeof claudeInfo.rateLimitType === "string" && claudeInfo.rateLimitType.length > 0
+        ? claudeInfo.rateLimitType
+        : "five_hour";
+    const window = quotaWindow(kind, claudeInfo);
+    if (window) return { windows: [window] };
+  }
+
+  return undefined;
+}
+
 function normalizeRuntimeTurnState(
   value: string | undefined,
 ): "completed" | "failed" | "interrupted" | "cancelled" {
@@ -776,6 +859,27 @@ export function runtimeEventToActivities(
           tone: "info",
           kind: "context-window.updated",
           summary: "Context window updated",
+          payload,
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "account.rate-limits.updated": {
+      const payload = buildQuotaActivityPayload(event);
+      if (!payload) {
+        return [];
+      }
+
+      // Latest-wins on the client: the chip renders only the newest snapshot.
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "quota.updated",
+          summary: "Rate limits updated",
           payload,
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,

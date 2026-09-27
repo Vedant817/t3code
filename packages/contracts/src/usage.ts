@@ -123,6 +123,17 @@ export const UsageSourceFingerprint = Schema.Struct({
    * effectively never collides across machines. Empty when it cannot be read.
    */
   volumeId: Schema.String,
+  /**
+   * Content-derived identity of the transcript directory, as a hex digest.
+   *
+   * One physical directory can be visible under different names and volumes on
+   * the two sides of an OS boundary (a Windows host plus its WSL distributions,
+   * for instance), where path and `volumeId` can never agree. A digest of the
+   * session file names the directory actually holds proves two sources saw the
+   * same files. Absent when the sample is too small to be conclusive, so sparse
+   * directories never merge on a weak signal.
+   */
+  contentHint: Schema.optional(Schema.String),
 });
 export type UsageSourceFingerprint = typeof UsageSourceFingerprint.Type;
 

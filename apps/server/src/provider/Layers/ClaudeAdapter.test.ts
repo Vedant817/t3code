@@ -10,6 +10,7 @@ import type {
   PermissionResult,
   SDKMessage,
   SDKUserMessage,
+  SessionMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   ApprovalRequestId,
@@ -37,7 +38,11 @@ import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
-import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
+import {
+  claudeForkBoundaryMessageId,
+  makeClaudeAdapter,
+  type ClaudeAdapterLiveOptions,
+} from "./ClaudeAdapter.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
@@ -155,6 +160,8 @@ function makeHarness(config?: {
   readonly baseDir?: string;
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
+  readonly forkSession?: ClaudeAdapterLiveOptions["forkSession"];
+  readonly getSessionMessages?: ClaudeAdapterLiveOptions["getSessionMessages"];
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -170,6 +177,8 @@ function makeHarness(config?: {
       createInput = input;
       return query;
     },
+    ...(config?.forkSession ? { forkSession: config.forkSession } : {}),
+    ...(config?.getSessionMessages ? { getSessionMessages: config.getSessionMessages } : {}),
     ...(config?.nativeEventLogger
       ? {
           nativeEventLogger: config.nativeEventLogger,
@@ -267,6 +276,117 @@ const THREAD_ID = ThreadId.make("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.make("thread-claude-resume");
 
 describe("ClaudeAdapterLive", () => {
+  it("selects the final top-level assistant message at a historical turn boundary", () => {
+    const message = (
+      type: SessionMessage["type"],
+      uuid: string,
+      content: unknown,
+      parentToolUseId: string | null = null,
+    ): SessionMessage => ({
+      type,
+      uuid,
+      session_id: "550e8400-e29b-41d4-a716-446655440000",
+      message: { content },
+      parent_tool_use_id: parentToolUseId,
+    });
+    const messages = [
+      message("user", "user-1", "first"),
+      message("assistant", "assistant-1a", [{ type: "tool_use" }]),
+      message("user", "tool-result-1", [{ type: "tool_result" }]),
+      message("assistant", "assistant-1b", [{ type: "text", text: "done" }]),
+      message("assistant", "subagent-1", [{ type: "text", text: "child" }], "tool-1"),
+      message("user", "user-2", [{ type: "text", text: "second" }]),
+      message("assistant", "assistant-2", [{ type: "text", text: "done" }]),
+    ];
+
+    assert.equal(claudeForkBoundaryMessageId(messages, 1), "assistant-1b");
+    assert.equal(claudeForkBoundaryMessageId(messages, 2), "assistant-2");
+    assert.equal(claudeForkBoundaryMessageId(messages, 3), undefined);
+  });
+
+  it.effect("forks Claude history at the requested completed turn", () => {
+    const forkCalls: Array<{
+      readonly sessionId: string;
+      readonly options: { readonly dir?: string; readonly upToMessageId?: string };
+    }> = [];
+    const messages: SessionMessage[] = [
+      {
+        type: "user",
+        uuid: "user-1",
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        message: { content: "first" },
+        parent_tool_use_id: null,
+      },
+      {
+        type: "assistant",
+        uuid: "assistant-1",
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        message: { content: [{ type: "text", text: "one" }] },
+        parent_tool_use_id: null,
+      },
+      {
+        type: "user",
+        uuid: "user-2",
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        message: { content: "second" },
+        parent_tool_use_id: null,
+      },
+      {
+        type: "assistant",
+        uuid: "assistant-2",
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        message: { content: [{ type: "text", text: "two" }] },
+        parent_tool_use_id: null,
+      },
+    ];
+    const harness = makeHarness({
+      cwd: "/tmp/claude-fork-source",
+      getSessionMessages: async () => messages,
+      forkSession: async (sessionId, options) => {
+        forkCalls.push({ sessionId, options: options ?? {} });
+        return { sessionId: "650e8400-e29b-41d4-a716-446655440000" };
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const sourceThreadId = ThreadId.make("thread-claude-fork-source");
+      const targetThreadId = ThreadId.make("thread-claude-fork-target");
+      const source = yield* adapter.startSession({
+        threadId: sourceThreadId,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/claude-fork-source",
+      });
+
+      const result = yield* adapter.forkThread!(
+        sourceThreadId,
+        targetThreadId,
+        null,
+        "/tmp/claude-fork-target",
+        2,
+      );
+
+      assert.equal(adapter.capabilities.threadFork, "native");
+      assert.deepEqual(forkCalls, [
+        {
+          sessionId: (source.resumeCursor as { resume: string }).resume,
+          options: {
+            dir: "/tmp/claude-fork-source",
+            upToMessageId: "assistant-2",
+          },
+        },
+      ]);
+      assert.deepEqual(result.resumeCursor, {
+        threadId: targetThreadId,
+        resume: "650e8400-e29b-41d4-a716-446655440000",
+        turnCount: 2,
+      });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("returns validation error for non-claude provider on startSession", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

@@ -82,6 +82,77 @@ describe("runtimeEventToActivities task progress", () => {
     expect(usagePayload).not.toHaveProperty("status");
   });
 });
+describe("runtimeEventToActivities rate-limit snapshots", () => {
+  it("normalizes Codex primary and secondary windows to percent and milliseconds", () => {
+    const event = {
+      ...base,
+      type: "account.rate-limits.updated",
+      eventId: EventId.make("evt-quota-codex"),
+      payload: {
+        rateLimits: {
+          rateLimits: {
+            primary: { usedPercent: 37, resetsAt: 1_774_918_800 },
+            secondary: { usedPercent: 12, resetsAt: null },
+          },
+        },
+      },
+    } satisfies ProviderRuntimeEvent;
+
+    const activities = runtimeEventToActivities(event);
+
+    expect(activities).toHaveLength(1);
+    expect(activities[0]?.kind).toBe("quota.updated");
+    const payload = activities[0]?.payload as Record<string, unknown>;
+    const windows = payload.windows as ReadonlyArray<Record<string, unknown>>;
+    expect(windows).toHaveLength(2);
+    expect(windows[0]).toEqual({ kind: "primary", usedPercent: 37, resetsAtMs: 1_774_918_800_000 });
+    expect(windows[1]).toEqual({ kind: "secondary", usedPercent: 12 });
+  });
+
+  it("normalizes Claude's fraction utilization into a percent", () => {
+    const event = {
+      ...base,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      type: "account.rate-limits.updated",
+      eventId: EventId.make("evt-quota-claude"),
+      payload: {
+        rateLimits: {
+          type: "rate_limit_event",
+          rate_limit_info: {
+            status: "allowed_warning",
+            rateLimitType: "five_hour",
+            utilization: 0.62,
+            resetsAt: 1_774_918_800,
+          },
+        },
+      },
+    } satisfies ProviderRuntimeEvent;
+
+    const activities = runtimeEventToActivities(event);
+
+    expect(activities).toHaveLength(1);
+    const payload = activities[0]?.payload as Record<string, unknown>;
+    const windows = payload.windows as ReadonlyArray<Record<string, unknown>>;
+    expect(windows).toEqual([
+      { kind: "five_hour", usedPercent: 62, resetsAtMs: 1_774_918_800_000 },
+    ]);
+  });
+
+  it("emits nothing when the provider reports no usable window figures", () => {
+    const event = {
+      ...base,
+      type: "account.rate-limits.updated",
+      eventId: EventId.make("evt-quota-empty"),
+      payload: {
+        rateLimits: {
+          rate_limit_info: { status: "allowed" },
+        },
+      },
+    } satisfies ProviderRuntimeEvent;
+
+    expect(runtimeEventToActivities(event)).toEqual([]);
+  });
+});
 describe("runtimeEventToActivities tool streaming persistence", () => {
   const accumulatedStdout = [
     "first line of output",

@@ -159,20 +159,18 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     ): Effect.Effect<void, ProviderAdapterError> => Effect.void,
   );
 
-  const stopSession = vi.fn(
-    (threadId: ThreadId): Effect.Effect<void, ProviderAdapterError> =>
-      Effect.sync(() => {
-        sessions.delete(threadId);
-      }),
+  const stopSession = vi.fn((threadId: ThreadId): Effect.Effect<void, ProviderAdapterError> =>
+    Effect.sync(() => {
+      sessions.delete(threadId);
+    }),
   );
 
-  const listSessions = vi.fn(
-    (): Effect.Effect<ReadonlyArray<ProviderSession>> =>
-      Effect.sync(() => Array.from(sessions.values())),
+  const listSessions = vi.fn((): Effect.Effect<ReadonlyArray<ProviderSession>> =>
+    Effect.sync(() => Array.from(sessions.values())),
   );
 
-  const hasSession = vi.fn(
-    (threadId: ThreadId): Effect.Effect<boolean> => Effect.succeed(sessions.has(threadId)),
+  const hasSession = vi.fn((threadId: ThreadId): Effect.Effect<boolean> =>
+    Effect.succeed(sessions.has(threadId)),
   );
 
   const readThread = vi.fn(
@@ -205,18 +203,28 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     ): Effect.Effect<ProviderUploadFeedbackResult, ProviderAdapterError> =>
       Effect.succeed({ feedbackId: `feedback-${input.threadId}` }),
   );
+  const forkThread = vi.fn(
+    (
+      _sourceThreadId: ThreadId,
+      targetThreadId: ThreadId,
+      _lastTurnId: TurnId | null,
+      _cwd: string,
+      _checkpointTurnCount: number,
+    ): Effect.Effect<{ resumeCursor: unknown }, ProviderAdapterError> =>
+      Effect.succeed({ resumeCursor: { threadId: `provider-${String(targetThreadId)}` } }),
+  );
 
-  const stopAll = vi.fn(
-    (): Effect.Effect<void, ProviderAdapterError> =>
-      Effect.sync(() => {
-        sessions.clear();
-      }),
+  const stopAll = vi.fn((): Effect.Effect<void, ProviderAdapterError> =>
+    Effect.sync(() => {
+      sessions.clear();
+    }),
   );
 
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider,
     capabilities: {
       sessionModelSwitch: "in-session",
+      threadFork: provider === CODEX_DRIVER ? "native" : "unsupported",
     },
     startSession,
     sendTurn,
@@ -229,6 +237,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     readThread,
     rollbackThread,
     ...(provider === CODEX_DRIVER ? { uploadFeedback } : {}),
+    forkThread,
     stopAll,
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
@@ -265,6 +274,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     readThread,
     rollbackThread,
     uploadFeedback,
+    forkThread,
     stopAll,
   };
 }
@@ -928,6 +938,61 @@ it.effect(
 );
 
 routing.layer("ProviderServiceLive routing", (it) => {
+  it.effect("releases the source writer before resuming a native fork", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const sourceThreadId = asThreadId("thread-fork-source");
+      const targetThreadId = asThreadId("thread-fork-target");
+      yield* provider.startSession(sourceThreadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId: sourceThreadId,
+        cwd: "/tmp/source",
+        runtimeMode: "full-access",
+      });
+      routing.codex.startSession.mockClear();
+      routing.codex.stopSession.mockClear();
+      routing.codex.forkThread.mockClear();
+
+      const child = yield* provider.forkConversation!({
+        sourceThreadId,
+        targetThreadId,
+        checkpointTurnCount: 1,
+        lastTurnId: asTurnId("turn-1"),
+        cwd: "/tmp/fork",
+        runtimeMode: "full-access",
+        modelSelection: createModelSelection(codexInstanceId, "gpt-5.6-luna"),
+      });
+
+      assert.deepEqual(routing.codex.forkThread.mock.calls, [
+        [sourceThreadId, targetThreadId, asTurnId("turn-1"), "/tmp/fork", 1],
+      ]);
+      assert.deepEqual(routing.codex.stopSession.mock.calls, [[sourceThreadId]]);
+      assert.equal(routing.codex.startSession.mock.calls.length, 1);
+      assert.deepEqual(routing.codex.startSession.mock.calls[0]?.[0].resumeCursor, {
+        threadId: `provider-${String(targetThreadId)}`,
+      });
+      assert.equal(child.threadId, targetThreadId);
+      assert.equal(
+        routing.codex.stopSession.mock.invocationCallOrder[0]! <
+          routing.codex.startSession.mock.invocationCallOrder[0]!,
+        true,
+      );
+      routing.codex.startSession.mockClear();
+      yield* provider.sendTurn({
+        threadId: sourceThreadId,
+        input: "continue the original",
+        attachments: [],
+      });
+      assert.equal(routing.codex.startSession.mock.calls.length, 1);
+      assert.equal(routing.codex.startSession.mock.calls[0]?.[0].threadId, sourceThreadId);
+      assert.equal(routing.codex.sendTurn.mock.calls.at(-1)?.[0].threadId, sourceThreadId);
+      yield* provider.stopSession({ threadId: sourceThreadId });
+      yield* provider.stopSession({ threadId: targetThreadId });
+      routing.codex.sendTurn.mockClear();
+    }),
+  );
+
   it.effect("routes provider operations and rollback conversation", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;

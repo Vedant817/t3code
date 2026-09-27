@@ -84,28 +84,29 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       }),
   );
 
-  public readonly interruptTurnImpl = vi.fn(
-    (_turnId?: TurnId): Promise<void> => Promise.resolve(undefined),
+  public readonly interruptTurnImpl = vi.fn((_turnId?: TurnId): Promise<void> =>
+    Promise.resolve(undefined),
   );
 
-  public readonly readThreadImpl = vi.fn(
-    (): Promise<CodexThreadSnapshot> =>
-      Promise.resolve({
-        threadId: "provider-thread-1",
-        turns: [],
-      }),
+  public readonly readThreadImpl = vi.fn((): Promise<CodexThreadSnapshot> =>
+    Promise.resolve({
+      threadId: "provider-thread-1",
+      turns: [],
+    }),
   );
 
-  public readonly rollbackThreadImpl = vi.fn(
-    (_numTurns: number): Promise<CodexThreadSnapshot> =>
-      Promise.resolve({
-        threadId: "provider-thread-1",
-        turns: [],
-      }),
+  public readonly rollbackThreadImpl = vi.fn((_numTurns: number): Promise<CodexThreadSnapshot> =>
+    Promise.resolve({
+      threadId: "provider-thread-1",
+      turns: [],
+    }),
   );
 
   public readonly uploadFeedbackImpl = vi.fn((_reason?: string) =>
     Promise.resolve({ threadId: "provider-thread-1" }),
+  );
+  public readonly forkThreadImpl = vi.fn((_lastTurnId: TurnId | null, _cwd: string) =>
+    Promise.resolve({ threadId: "forked-provider-thread" }),
   );
 
   public readonly respondToRequestImpl = vi.fn(
@@ -148,6 +149,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   uploadFeedback(reason?: string) {
     return Effect.promise(() => this.uploadFeedbackImpl(reason));
+  }
+
+  forkThread(lastTurnId: TurnId | null, cwd: string) {
+    return Effect.promise(() => this.forkThreadImpl(lastTurnId, cwd));
   }
 
   respondToRequest(requestId: ApprovalRequestId, decision: ProviderApprovalDecision) {
@@ -295,6 +300,33 @@ validationLayer("CodexAdapterLive validation", (it) => {
         threadId: asThreadId("thread-1"),
         runtimeMode: "full-access",
       });
+    }),
+  );
+  it.effect("forks provider history through the requested completed turn", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const sourceThreadId = asThreadId("fork-source");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: sourceThreadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = validationRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      const result = yield* adapter.forkThread!(
+        sourceThreadId,
+        asThreadId("fork-target"),
+        asTurnId("turn-2"),
+        "/tmp/fork-target",
+        2,
+      );
+      NodeAssert.deepStrictEqual(result, {
+        resumeCursor: { threadId: "forked-provider-thread" },
+      });
+      NodeAssert.deepStrictEqual(runtime.forkThreadImpl.mock.calls[0], [
+        asTurnId("turn-2"),
+        "/tmp/fork-target",
+      ]);
     }),
   );
 });

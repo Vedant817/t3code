@@ -1,10 +1,14 @@
-import type { OrchestrationThreadActivity, ThreadTokenUsageSnapshot } from "@t3tools/contracts";
+import type {
+  OrchestrationThreadActivity,
+  ThreadTokenUsageSnapshot,
+  TurnId,
+} from "@t3tools/contracts";
 
-function asRecord(value: unknown): Record<string, unknown> | null {
+export function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
 
-function asFiniteNumber(value: unknown): number | null {
+export function asFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
@@ -109,4 +113,151 @@ export function formatContextWindowTokens(value: number | null): string {
     return `${Math.round(value / 1_000)}k`;
   }
   return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+}
+
+// ---------------------------------------------------------------------------
+// Per-turn token usage — what a response cost to produce. Providers report
+// usage as `context-window.updated` activities carrying a
+// ThreadTokenUsageSnapshot; the snapshot is context-shaped (cumulative), so
+// production is derived as the delta of `totalProcessedTokens` between
+// consecutive snapshots, falling back to the reported output side when no
+// baseline exists in the loaded activity window.
+// ---------------------------------------------------------------------------
+
+export type TurnTokenUsageSummary = {
+  readonly turnId: TurnId;
+  /**
+   * Tokens processed to produce this turn's outputs — text, code edits,
+   * tool calls, and thinking combined. Null when the provider reported
+   * nothing usable.
+   */
+  readonly producedTokens: number | null;
+  readonly inputTokens: number | null;
+  readonly cachedInputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly reasoningOutputTokens: number | null;
+  readonly toolUses: number | null;
+  readonly durationMs: number | null;
+};
+
+interface TurnTokenUsageAccumulator {
+  startTotal: number | null;
+  endTotal: number | null;
+  fallbackOutput: number | null;
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  outputTokens: number | null;
+  reasoningOutputTokens: number | null;
+  toolUses: number | null;
+  durationMs: number | null;
+}
+
+/**
+ * Derive per-turn token usage summaries from thread activities, keyed by the
+ * turn that produced them. Usage activities without a turn still advance the
+ * cumulative baseline so their tokens never leak into the next turn's delta.
+ */
+export function deriveTurnTokenUsageByTurnId(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): Map<TurnId, TurnTokenUsageSummary> {
+  const byTurnId = new Map<TurnId, TurnTokenUsageAccumulator>();
+  let previousTotal: number | null = null;
+
+  for (const activity of activities) {
+    if (activity.kind !== "context-window.updated") {
+      continue;
+    }
+
+    const payload = asRecord(activity.payload);
+    const totalProcessedTokens = asFiniteNumber(payload?.totalProcessedTokens);
+    const usedTokens = asFiniteNumber(payload?.usedTokens);
+    const outputTokens = asFiniteNumber(payload?.outputTokens);
+    const reasoningOutputTokens = asFiniteNumber(payload?.reasoningOutputTokens);
+
+    if (activity.turnId !== null && usedTokens !== null && usedTokens >= 0) {
+      let accumulator = byTurnId.get(activity.turnId);
+      if (!accumulator) {
+        accumulator = {
+          startTotal: null,
+          endTotal: null,
+          fallbackOutput: null,
+          inputTokens: null,
+          cachedInputTokens: null,
+          outputTokens: null,
+          reasoningOutputTokens: null,
+          toolUses: null,
+          durationMs: null,
+        };
+        byTurnId.set(activity.turnId, accumulator);
+      }
+
+      if (totalProcessedTokens !== null && totalProcessedTokens > 0) {
+        // First snapshot of the turn records where production starts from;
+        // no baseline (session start or truncated history) means the delta
+        // is unusable and the output-side fallback takes over.
+        accumulator.startTotal ??= previousTotal;
+        accumulator.endTotal = totalProcessedTokens;
+      }
+
+      const reportedOutput =
+        (outputTokens ?? 0) + (reasoningOutputTokens ?? 0) > 0
+          ? (outputTokens ?? 0) + (reasoningOutputTokens ?? 0)
+          : null;
+      accumulator.fallbackOutput ??= reportedOutput;
+
+      // Latest request wins: these fields describe the closing API call,
+      // which is the most representative breakdown for the turn.
+      accumulator.inputTokens = asFiniteNumber(payload?.inputTokens);
+      accumulator.cachedInputTokens = asFiniteNumber(payload?.cachedInputTokens);
+      accumulator.outputTokens = outputTokens;
+      accumulator.reasoningOutputTokens = reasoningOutputTokens;
+      accumulator.toolUses = asFiniteNumber(payload?.toolUses);
+      accumulator.durationMs = asFiniteNumber(payload?.durationMs);
+    }
+
+    if (totalProcessedTokens !== null && totalProcessedTokens > 0) {
+      previousTotal = totalProcessedTokens;
+    }
+  }
+
+  const result = new Map<TurnId, TurnTokenUsageSummary>();
+  for (const [turnId, accumulator] of byTurnId) {
+    const producedTokens =
+      accumulator.endTotal !== null && accumulator.startTotal !== null
+        ? Math.max(0, accumulator.endTotal - accumulator.startTotal)
+        : accumulator.fallbackOutput;
+    if (producedTokens === null || producedTokens <= 0) {
+      continue;
+    }
+    result.set(turnId, {
+      turnId,
+      producedTokens,
+      inputTokens: accumulator.inputTokens,
+      cachedInputTokens: accumulator.cachedInputTokens,
+      outputTokens: accumulator.outputTokens,
+      reasoningOutputTokens: accumulator.reasoningOutputTokens,
+      toolUses: accumulator.toolUses,
+      durationMs: accumulator.durationMs,
+    });
+  }
+  return result;
+}
+
+/**
+ * Cheap identity for the usage-bearing slice of an activity list. Activities
+ * only ever append (or slide at the projection cap), so last-usage id plus
+ * count detects every change without hashing payloads.
+ */
+export function tokenUsageActivitiesSignature(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): string {
+  let count = 0;
+  let lastId = "";
+  for (const activity of activities) {
+    if (activity.kind === "context-window.updated") {
+      count += 1;
+      lastId = activity.id;
+    }
+  }
+  return `${count}:${lastId}`;
 }

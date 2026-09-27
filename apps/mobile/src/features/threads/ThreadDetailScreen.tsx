@@ -102,6 +102,10 @@ export interface ThreadDetailScreenProps {
   readonly threadSyncStatus?: EnvironmentThreadStatus;
   /** Non-null when older turns exist beyond the loaded window. */
   readonly loadEarlier?: { readonly loading: boolean; readonly onLoadEarlier: () => void } | null;
+  readonly forkTurnCountByMessageId?: ReadonlyMap<string, number>;
+  readonly onForkMessage?: (messageId: MessageId) => void;
+  readonly isForkingThread?: boolean;
+  readonly activeThreadBusy: boolean;
   readonly environmentId: EnvironmentId;
   readonly projectWorkspaceRoot: string | null;
   readonly threadCwd: string | null;
@@ -630,6 +634,13 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             onEndFollowEnabledChange={setEndFollowEnabled}
             skills={selectedProviderSkills}
             loadEarlier={props.loadEarlier ?? null}
+            {...(props.forkTurnCountByMessageId
+              ? { forkTurnCountByMessageId: props.forkTurnCountByMessageId }
+              : {})}
+            {...(props.onForkMessage ? { onForkMessage: props.onForkMessage } : {})}
+            {...(props.isForkingThread === undefined
+              ? {}
+              : { isForkingThread: props.isForkingThread })}
           />
         </View>
       ) : (

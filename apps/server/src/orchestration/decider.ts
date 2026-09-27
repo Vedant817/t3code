@@ -383,6 +383,57 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.fork": {
+      const sourceThread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.sourceThreadId,
+      });
+      yield* requireThreadAbsent({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (command.threadId === command.sourceThreadId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "A thread cannot be forked onto itself.",
+        });
+      }
+      if (command.checkpointTurnCount > 0) {
+        // The restart-optimized command read model retains only the latest
+        // checkpoint summary. Its count provides a bounded validity check;
+        // the fork reactor performs the exact persisted-ref lookup before any
+        // VCS work.
+        const checkpointIsAvailable = sourceThread.checkpoints.some(
+          (entry) =>
+            entry.status === "ready" && entry.checkpointTurnCount >= command.checkpointTurnCount,
+        );
+        if (!checkpointIsAvailable) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Checkpoint ${command.checkpointTurnCount} is outside the retained history of thread '${command.sourceThreadId}'.`,
+          });
+        }
+      }
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.forked",
+        payload: {
+          threadId: command.threadId,
+          sourceThreadId: command.sourceThreadId,
+          checkpointTurnCount: command.checkpointTurnCount,
+          createdAt: command.createdAt,
+          updatedAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.delete": {
       yield* requireThread({
         readModel,

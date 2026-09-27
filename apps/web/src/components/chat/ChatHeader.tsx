@@ -32,6 +32,9 @@ import ProjectScriptsControl, {
   type ProjectScriptActionResult,
 } from "../ProjectScriptsControl";
 import { OpenInPicker } from "./OpenInPicker";
+import { ThreadUsageChip } from "./ThreadUsageChip";
+import type { ContextWindowSnapshot } from "~/lib/contextWindow";
+import type { QuotaSnapshot } from "~/lib/quota";
 import { useRemoteOpenState, type RemoteOpenMode } from "../../remoteOpen";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useT3ProjectFileScripts } from "~/hooks/useT3ProjectFileScripts";
@@ -55,6 +58,13 @@ interface ChatHeaderProps {
   isServerThread: boolean;
   /** PR feeding the settled classification, resolved by ChatView. */
   changeRequest: ChangeRequestSettleSource | null;
+  /**
+   * Latest provider-reported token snapshot for the thread; renders the
+   * usage chip beside the title when present (server threads only).
+   */
+  threadUsageSnapshot?: ContextWindowSnapshot | null;
+  /** Latest provider-reported rate-limit snapshot, shown inside the usage chip. */
+  threadQuotaSnapshot?: QuotaSnapshot | null;
   activeProjectName: string | undefined;
   activeProjectCwd: string | null;
   activeProjectFaviconPath: string | null;
@@ -124,6 +134,8 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadTitle,
   isServerThread,
   changeRequest,
+  threadUsageSnapshot = null,
+  threadQuotaSnapshot = null,
   activeProjectName,
   activeProjectCwd,
   activeProjectFaviconPath,
@@ -371,6 +383,9 @@ export const ChatHeader = memo(function ChatHeader({
               <TooltipPopup side="top">{activeThreadTitle}</TooltipPopup>
             </Tooltip>
           )}
+          {isServerThread && threadUsageSnapshot ? (
+            <ThreadUsageChip snapshot={threadUsageSnapshot} quota={threadQuotaSnapshot} />
+          ) : null}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
       <div

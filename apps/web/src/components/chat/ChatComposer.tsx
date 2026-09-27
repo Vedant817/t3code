@@ -39,6 +39,7 @@ import {
   type ComposerSubmissionIntent,
   type ComposerTrigger,
   collapseExpandedComposerCursor,
+  composerEscapeAction,
   composerSubmissionIntentForEnter,
   detectComposerTrigger,
   expandCollapsedComposerCursor,
@@ -637,6 +638,8 @@ export interface ChatComposerProps {
   scheduleComposerFocus: () => void;
   setThreadError: (threadId: ThreadId | null, error: string | null) => void;
   onExpandImage: (preview: ExpandedImagePreview) => void;
+  /** Raw text of the most recent send on this thread, for Escape recall. */
+  getLastSentPrompt: () => string | null;
 }
 
 // --------------------------------------------------------------------------
@@ -710,6 +713,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     scheduleComposerFocus,
     setThreadError,
     onExpandImage,
+    getLastSentPrompt,
   } = props;
   const isSendDisabled = sendDisabledReason !== null;
 
@@ -2467,6 +2471,47 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     projectSelectionRequired,
     stashCurrentPrompt,
     terminalOpen,
+  ]);
+
+  useEffect(() => {
+    const handler = (event: globalThis.KeyboardEvent) => {
+      const action = composerEscapeAction({
+        key: event.key,
+        isComposing: event.isComposing,
+        keyCode: event.keyCode,
+        composerMenuOpen: composerMenuOpenRef.current,
+        stashMenuOpen: isStashMenuOpen,
+        modelPickerOpen: isComposerModelPickerOpen,
+        commandPaletteOpen: isCommandPaletteOpen(),
+        approvalOrProgressActive:
+          pendingUserInputs.length > 0 ||
+          isComposerApprovalState ||
+          projectSelectionRequired ||
+          activePendingProgress !== null,
+        terminalFocused: getTerminalFocusOwner() !== null,
+        hasSendableContent: composerSendState.hasSendableContent,
+        lastSentPrompt: getLastSentPrompt(),
+      });
+      if (action === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const recalled = getLastSentPrompt();
+      if (recalled !== null) {
+        setPromptFromTraits(recalled);
+      }
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [
+    activePendingProgress,
+    composerSendState.hasSendableContent,
+    getLastSentPrompt,
+    isComposerApprovalState,
+    isComposerModelPickerOpen,
+    isStashMenuOpen,
+    pendingUserInputs.length,
+    projectSelectionRequired,
+    setPromptFromTraits,
   ]);
 
   // ------------------------------------------------------------------

@@ -81,6 +81,25 @@ it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
   }),
 );
 
+it.effect("parses a historical thread fork command", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationCommand({
+      type: "thread.fork",
+      commandId: "cmd-fork-1",
+      threadId: "thread-child",
+      sourceThreadId: "thread-source",
+      checkpointTurnCount: 2,
+      createdAt: "2026-08-09T00:00:00.000Z",
+    });
+
+    assert.strictEqual(parsed.type, "thread.fork");
+    if (parsed.type !== "thread.fork") return;
+    assert.strictEqual(parsed.threadId, "thread-child");
+    assert.strictEqual(parsed.sourceThreadId, "thread-source");
+    assert.strictEqual(parsed.checkpointTurnCount, 2);
+  }),
+);
+
 it.effect("parses turn diff input with whitespace ignoring enabled", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeTurnDiffInput({

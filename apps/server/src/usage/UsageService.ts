@@ -17,6 +17,7 @@ import {
   USAGE_CONTRACT_VERSION,
   type UsageProviderKind,
   type UsageSource,
+  type UsageSourceFingerprint,
   type UsageSummary,
   type UsageSummaryInput,
   UsageReadError,
@@ -42,6 +43,7 @@ import { readOpenCodeUsage, resolveOpenCodeDataDir } from "./usageOpenCodeReader
 import { parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
   listTranscriptFiles,
+  readDirectoryContentHint,
   readDirectoryVolumeId,
   readTranscriptRecords,
 } from "./usageTranscriptReader.ts";
@@ -355,6 +357,20 @@ export const make = Effect.gen(function* () {
     const livePaths = new Set<string>();
     const walkedRoots: string[] = [];
 
+    // One literal per provider keeps the six emission sites below from drifting.
+    const buildFingerprint = (
+      provider: UsageProviderKind,
+      dir: string,
+      volumeId: string,
+      contentHint?: string,
+    ): UsageSourceFingerprint => ({
+      hostId,
+      provider,
+      resolvedHomePath: dir,
+      volumeId,
+      ...(contentHint === undefined ? {} : { contentHint }),
+    });
+
     for (const { provider, dir } of dirs) {
       const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
       const exists = yield* fileSystem
@@ -363,7 +379,7 @@ export const make = Effect.gen(function* () {
 
       if (!exists) {
         sources.push({
-          fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
+          fingerprint: buildFingerprint(provider, dir, volumeId),
           status: "missing",
           scannedFiles: 0,
           skippedFiles: 0,
@@ -373,6 +389,10 @@ export const make = Effect.gen(function* () {
         });
         continue;
       }
+
+      // Content identity lets two views of one physical directory across an OS
+      // boundary dedupe; it costs one name-only walk beside the scan itself.
+      const contentHint = yield* Effect.promise(() => readDirectoryContentHint(dir));
 
       walkedRoots.push(dir);
       const files = yield* Effect.promise(() => listTranscriptFiles(dir, windowStartMs));
@@ -400,7 +420,7 @@ export const make = Effect.gen(function* () {
       }
 
       sources.push({
-        fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
+        fingerprint: buildFingerprint(provider, dir, volumeId, contentHint ?? undefined),
         status: "ok",
         scannedFiles,
         skippedFiles,
@@ -417,12 +437,7 @@ export const make = Effect.gen(function* () {
 
     if (!openCodeExists) {
       sources.push({
-        fingerprint: {
-          hostId,
-          provider: "opencode",
-          resolvedHomePath: openCodeDataDir,
-          volumeId: openCodeVolumeId,
-        },
+        fingerprint: buildFingerprint("opencode", openCodeDataDir, openCodeVolumeId),
         status: "missing",
         scannedFiles: 0,
         skippedFiles: 0,
@@ -434,12 +449,7 @@ export const make = Effect.gen(function* () {
       const result = yield* Effect.promise(() => readOpenCodeUsage(openCodeDataDir, windowStartMs));
       if (result === null) {
         sources.push({
-          fingerprint: {
-            hostId,
-            provider: "opencode",
-            resolvedHomePath: openCodeDataDir,
-            volumeId: openCodeVolumeId,
-          },
+          fingerprint: buildFingerprint("opencode", openCodeDataDir, openCodeVolumeId),
           status: "failed",
           scannedFiles: 0,
           skippedFiles: 0,
@@ -449,12 +459,7 @@ export const make = Effect.gen(function* () {
         });
       } else if (result.storageKind === "missing") {
         sources.push({
-          fingerprint: {
-            hostId,
-            provider: "opencode",
-            resolvedHomePath: openCodeDataDir,
-            volumeId: openCodeVolumeId,
-          },
+          fingerprint: buildFingerprint("opencode", openCodeDataDir, openCodeVolumeId),
           status: "missing",
           scannedFiles: 0,
           skippedFiles: 0,
@@ -470,12 +475,9 @@ export const make = Effect.gen(function* () {
           }
         }
         sources.push({
-          fingerprint: {
-            hostId,
-            provider: "opencode",
-            resolvedHomePath: openCodeDataDir,
-            volumeId: openCodeVolumeId,
-          },
+          // No contentHint: the store is a handful of database files, far
+          // below a conclusive name sample.
+          fingerprint: buildFingerprint("opencode", openCodeDataDir, openCodeVolumeId),
           status: result.malformedRecords > 0 ? "partial" : "ok",
           scannedFiles: result.scannedFiles,
           skippedFiles: result.skippedFiles,

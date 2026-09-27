@@ -25,3 +25,26 @@ pill** fallback because their colors are not controlled by T3 Code.
 To generate a fresh title from the conversation, open a thread's context menu and choose
 **Regenerate title**. While T3 Code is generating it, the action reads **Regenerating…** and cannot
 be selected again. The option is hidden when the connected environment needs a server update.
+
+## Forking from an earlier turn
+
+In a Codex, Claude, or OpenCode thread, hover a completed user or assistant message on web and
+desktop, or use the fork button beside that message on mobile. T3 Code creates a new thread whose
+conversation and files end at that point, then opens it. The original thread is not changed.
+
+The fork receives its own provider conversation, Git branch, worktree, and checkpoint refs. The
+control is hidden when the selected provider cannot create an independent historical conversation.
+It is also hidden when the connected server predates thread forking; update that environment's
+T3 Code server to enable it.
+
+## Thread alerts
+
+With **Agent notifications** enabled in **Settings General**, T3 Code sends a system notification
+when a background thread finishes, fails, or needs your approval — including threads in other
+projects and on other connected environments. The thread you are currently looking at never
+notifies. Turning the setting off stops notifications but keeps tracking, so re-enabling it does
+not replay old activity.
+
+The browser asks for notification permission when the setting is first turned on. If permission is
+denied or unavailable, alerts fall back to an in-app toast. The mobile app keeps its own separate
+notification controls.

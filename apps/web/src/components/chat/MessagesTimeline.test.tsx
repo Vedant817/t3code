@@ -330,6 +330,82 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("px-1 text-sm leading-relaxed text-muted-foreground");
   });
 
+  it("renders a token usage badge beside the copy button for settled assistant messages", () => {
+    const turnId = TurnId.make("turn-with-usage");
+    const assistantEntry = buildAssistantTimelineEntry("Done.");
+    const entry = { ...assistantEntry, message: { ...assistantEntry.message, turnId } };
+    const baseArgs = {
+      ...buildProps(),
+      latestTurn: {
+        turnId,
+        state: "completed" as const,
+        startedAt: "2026-03-17T19:12:20.000Z",
+        completedAt: "2026-03-17T19:12:28.000Z",
+      },
+      timelineEntries: [entry],
+    };
+    const hiddenMarkup = renderToStaticMarkup(<MessagesTimeline {...baseArgs} />);
+    const visibleMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...baseArgs}
+        turnTokenUsageByTurnId={
+          new Map([
+            [
+              turnId,
+              {
+                turnId,
+                producedTokens: 1200,
+                inputTokens: 900,
+                cachedInputTokens: 600,
+                outputTokens: 250,
+                reasoningOutputTokens: 50,
+                toolUses: 3,
+                durationMs: 6200,
+              },
+            ],
+          ])
+        }
+      />,
+    );
+
+    expect(hiddenMarkup).not.toContain('aria-label="Token usage:');
+    expect(visibleMarkup).toContain('aria-label="Token usage: 1.2k tok for this response"');
+    expect(visibleMarkup).toContain(">1.2k tok<");
+  });
+
+  it("renders fork controls only for messages with an exact historical boundary", () => {
+    const entry = buildUserTimelineEntry("Fork from here");
+    const hiddenMarkup = renderToStaticMarkup(
+      <MessagesTimeline {...buildProps()} timelineEntries={[entry]} />,
+    );
+    const enabledMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[entry]}
+        forkTurnCountByMessageId={new Map([[entry.message.id, 0]])}
+        onForkMessage={() => {}}
+      />,
+    );
+    const disabledMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[entry]}
+        forkTurnCountByMessageId={new Map([[entry.message.id, 0]])}
+        onForkMessage={() => {}}
+        isForkingThread
+      />,
+    );
+
+    expect(hiddenMarkup).not.toContain('aria-label="Fork thread from here"');
+    expect(enabledMarkup).toContain('aria-label="Fork thread from here"');
+    expect(enabledMarkup).not.toMatch(
+      /<button[^>]*disabled=""[^>]*aria-label="Fork thread from here"/,
+    );
+    expect(disabledMarkup).toMatch(
+      /<button[^>]*disabled=""[^>]*aria-label="Fork thread from here"/,
+    );
+  });
+
   it("uses the larger leading inset only when the top fade is enabled", () => {
     const timelineEntries = [buildUserTimelineEntry("Hello")];
 
