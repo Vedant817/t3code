@@ -476,8 +476,13 @@ export async function archiveSelectedThreadEntries<
 }
 
 export function buildMultiSelectThreadContextMenuItems(input: {
+  /** Every selected thread — labels the whole-selection actions. */
   count: number;
   hasRunningThread: boolean;
+  /**
+   * Only the selected threads the action would change, so a mixed selection
+   * cannot label the count for threads it leaves alone.
+   */
   unreadCount: number;
   readCount: number;
 }): readonly ContextMenuItem<"mark-read" | "mark-unread" | "archive" | "delete">[] {
