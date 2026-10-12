@@ -1,0 +1,75 @@
+name: Local Android APK (throwaway)
+
+# Builds a sideloadable debug APK from whatever branch this runs on. Used to
+# verify mobile changes on a physical device without a store build.
+on:
+  push:
+    branches:
+      - ci/local-android-apk-build
+  workflow_dispatch:
+
+concurrency:
+  group: local-android-apk-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    name: Build debug APK
+    # GitHub-hosted: blacksmith-* runners are installed on the upstream repo,
+    # not on forks.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      APP_VARIANT: development
+      NODE_OPTIONS: --max-old-space-size=8192
+      EXPO_NO_GIT_STATUS: "1"
+      CI: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/mobile...
+
+      - name: Expose pnpm
+        run: |
+          pnpm_version="$(node --print "require('./package.json').packageManager.split('@').pop()")"
+          vp_pnpm_bin="$HOME/.vite-plus/package_manager/pnpm/$pnpm_version/pnpm/bin"
+          echo "$vp_pnpm_bin" >> "$GITHUB_PATH"
+          "$vp_pnpm_bin/pnpm" --version
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install NDK and accept licenses
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.1.12297006"
+
+      - name: Prebuild Android
+        working-directory: apps/mobile
+        run: pnpm exec expo prebuild --clean --platform android --no-install
+
+      - name: Assemble debug APK
+        working-directory: apps/mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug -PreactNativeArchitectures=arm64-v8a --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: t3-code-dev-debug-apk
+          path: apps/mobile/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
